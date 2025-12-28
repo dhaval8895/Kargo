@@ -1,1000 +1,999 @@
-// client/src/App.jsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { io } from "socket.io-client";
+// server/index.js
+import express from "express";
+import http from "http";
+import cors from "cors";
+import { Server } from "socket.io";
 
-const SERVER_URL = import.meta.env.VITE_SERVER_URL;
+const app = express();
+app.use(cors());
+app.get("/", (_, res) => res.send("KARGO server running"));
 
-/* ---------------- Error Boundary ---------------- */
-class ErrorBoundary extends React.Component {
-  constructor(props) {
-    super(props);
-    this.state = { hasError: false, err: null };
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*" } });
+
+/* -------------------- Card helpers -------------------- */
+const SUITS = ["S", "H", "D", "C"];
+const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
+
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
   }
-  static getDerivedStateFromError(err) {
-    return { hasError: true, err };
-  }
-  componentDidCatch(err, info) {
-    console.error("UI crash:", err, info);
-  }
-  render() {
-    if (this.state.hasError) {
-      return (
-        <div style={page}>
-          <div style={cardWrap}>
-            <h2 style={{ marginTop: 0 }}>UI crashed (caught)</h2>
-            <div style={{ marginTop: 8, fontSize: 13, opacity: 0.85 }}>
-              <b>Error:</b> {String(this.state.err?.message || this.state.err || "Unknown")}
-            </div>
-            <button style={{ ...btn, marginTop: 14 }} onClick={() => window.location.reload()}>
-              Reload
-            </button>
-          </div>
-        </div>
-      );
+  return a;
+}
+
+function makeDecks(deckCount) {
+  const cards = [];
+  for (let d = 0; d < deckCount; d++) {
+    for (const s of SUITS) for (const r of RANKS) {
+      cards.push({ id: `${d}-${r}-${s}-${Math.random()}`, rank: r, suit: s });
     }
-    return this.props.children;
+    // 2 jokers per deck
+    cards.push({ id: `${d}-JOKER-0-${Math.random()}`, rank: "JOKER", suit: "J" });
+    cards.push({ id: `${d}-JOKER-1-${Math.random()}`, rank: "JOKER", suit: "J" });
+  }
+  return shuffle(cards);
+}
+
+function ensureDeck(room) {
+  if (room.deck.length > 0) return;
+  if (room.usedPile.length === 0) return;
+  room.deck = shuffle(room.usedPile);
+  room.usedPile = [];
+}
+
+function nowMs() {
+  return Date.now();
+}
+
+/* -------------------- Rooms -------------------- */
+const rooms = new Map();
+
+function makeRoomCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let code = "";
+  for (let i = 0; i < 5; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
+}
+
+/* -------------------- Used Window (race-claim) -------------------- */
+/**
+ * usedWindow = {
+ *   state: "open" | "postWin",
+ *   openedAt: ms,
+ *   card: Card,
+ *   postWinUntil?: ms
+ * }
+ *
+ * - While open: anyone can claim by matching rank; wrong claim => penalty.
+ * - When someone claims correctly: we set postWin for 200ms. Any additional click
+ *   during that 200ms => penalty (0.2s rule).
+ * - If open for >2000ms with no correct claim => card moves to usedPile.
+ */
+function tickUsedWindow(room) {
+  if (!room.usedWindow) return;
+  const w = room.usedWindow;
+  const t = nowMs();
+
+  if (w.state === "open") {
+    if (t - w.openedAt > 2000) {
+      room.usedPile.push(w.card);
+      room.usedWindow = null;
+    }
+    return;
+  }
+  if (w.state === "postWin") {
+    if (t > w.postWinUntil) room.usedWindow = null;
   }
 }
 
-/* ---------- Card helpers ---------- */
-function suitSymbol(suit) {
-  if (suit === "S") return "♠";
-  if (suit === "H") return "♥";
-  if (suit === "D") return "♦";
-  if (suit === "C") return "♣";
-  return "🃏";
+/* -------------------- Scoring -------------------- */
+function isRedSuit(s) {
+  return s === "H" || s === "D";
 }
-function isRedSuit(suit) {
-  return suit === "H" || suit === "D";
+function cardValue(card) {
+  if (!card) return 0;
+  if (card.rank === "JOKER") return 0;
+  if (card.rank === "A") return 1;
+  if (/^\d+$/.test(card.rank)) return Number(card.rank);
+  if (card.rank === "J") return 11;
+  if (card.rank === "Q") return 12;
+  if (card.rank === "K") return isRedSuit(card.suit) ? -1 : 13;
+  return 0;
 }
-function corner(small) {
-  return {
-    position: "absolute",
-    top: 8,
-    left: 8,
-    fontWeight: 900,
-    fontSize: small ? 12 : 14,
-    lineHeight: 1,
-  };
+function handTotal(hand) {
+  return (hand || []).filter(Boolean).reduce((sum, slot) => sum + cardValue(slot.card), 0);
 }
-function corner2(small) {
-  return {
-    position: "absolute",
-    bottom: 8,
-    right: 8,
-    fontWeight: 900,
-    fontSize: small ? 12 : 14,
-    lineHeight: 1,
-    transform: "rotate(180deg)",
-  };
+function countCards(hand) {
+  return (hand || []).filter(Boolean).length;
+}
+function snapshotHands(room) {
+  const snap = {};
+  for (const pid of room.order) {
+    const name = room.players.get(pid)?.name ?? "Unknown";
+    const hand = room.hands.get(pid) || [];
+    snap[name] = hand.map((s) => (s?.card ? { rank: s.card.rank, suit: s.card.suit } : null));
+  }
+  return snap;
 }
 
-function CardFace({ card, small }) {
-  const rank = card?.rank;
-  const suit = card?.suit;
-  const sym = rank === "JOKER" ? "🃏" : suitSymbol(suit);
-  const red = isRedSuit(suit);
-  return (
-    <>
-      <div style={{ ...corner(small), color: red ? "#b91c1c" : "#111827" }}>
-        {rank}
-        <div style={{ fontSize: small ? 12 : 14 }}>{sym}</div>
-      </div>
-      <div style={{ fontSize: small ? 28 : 44, fontWeight: 900, color: red ? "#b91c1c" : "#111827" }}>
-        {sym}
-      </div>
-      <div style={{ ...corner2(small), color: red ? "#b91c1c" : "#111827" }}>
-        {rank}
-        <div style={{ fontSize: small ? 12 : 14 }}>{sym}</div>
-      </div>
-    </>
-  );
+/* -------------------- Round end helpers -------------------- */
+function resetToLobby(room) {
+  room.phase = "lobby";
+  room.deck = [];
+  room.usedPile = [];
+  room.usedWindow = null;
+  room.hands = new Map();
+  room.turnIndex = 0;
+  room.drawnBy = new Map();
+  room.turnStageBy = new Map();
+  room.ready = new Map();
+  room.readyGateOpen = false;
+  room.kargo = null;
+  room.powerState = new Map();
+  room.lastRoundReveal = null;
 }
 
-const slotLabel = {
-  position: "absolute",
-  top: 6,
-  right: 8,
-  fontSize: 11,
-  opacity: 0.7,
-  fontWeight: 900,
-  color: "#111827",
-  background: "rgba(255,255,255,0.85)",
-  border: "1px solid rgba(17,24,39,0.12)",
-  padding: "2px 6px",
-  borderRadius: 999,
-};
+function recordRoundBoard(room, deltas) {
+  room.roundBoard = { endedAt: nowMs(), deltas };
+}
 
-function PlayingCard({ slot, onClick, disabled, small = false, labelText, forceBack = false, forceFrontCard = null }) {
-  const hasCard = !!slot || !!forceFrontCard || forceBack;
-  const faceUp = !!forceFrontCard || (!!slot?.faceUp && !!slot?.card);
+function endRoundAndScoreStandard(room, winnerPid, reason = "out") {
+  const winnerName = room.players.get(winnerPid)?.name ?? "Unknown";
 
-  const W = small ? 56 : 86;
-  const H = small ? 78 : 122;
+  // reveal snapshot BEFORE reset
+  room.lastRoundReveal = snapshotHands(room);
 
-  const outer = {
-    width: W,
-    height: H,
-    borderRadius: 14,
-    border: "1px solid #111827",
-    boxShadow: "0 6px 16px rgba(0,0,0,0.12)",
-    cursor: disabled ? "not-allowed" : "pointer",
-    opacity: disabled ? 0.55 : 1,
-    userSelect: "none",
-    background: faceUp ? "white" : "#0b1220",
-    position: "relative",
-    overflow: "hidden",
-    display: "grid",
-    placeItems: "center",
-  };
+  const deltas = [];
+  for (const pid of room.order) {
+    const name = room.players.get(pid)?.name ?? "Unknown";
+    const prev = room.scoreboard.get(name) ?? 0;
 
-  const backPattern = {
-    position: "absolute",
-    inset: 10,
-    borderRadius: 10,
-    border: "1px solid rgba(255,255,255,0.25)",
-    background:
-      "repeating-linear-gradient(45deg, rgba(255,255,255,0.12) 0, rgba(255,255,255,0.12) 6px, rgba(255,255,255,0.05) 6px, rgba(255,255,255,0.05) 12px)",
-  };
+    let delta = 0;
+    if (pid === winnerPid) delta = -20;
+    else delta = handTotal(room.hands.get(pid) || []);
 
-  if (!hasCard) {
-    return (
-      <div
-        style={{
-          ...outer,
-          background: "rgba(17,24,39,0.04)",
-          border: "1px dashed #9ca3af",
-          boxShadow: "none",
-        }}
-        onClick={disabled ? undefined : onClick}
-      >
-        <span style={{ opacity: 0.35, fontWeight: 800 }}>—</span>
-        {labelText && <div style={slotLabel}>{labelText}</div>}
-      </div>
-    );
+    room.scoreboard.set(name, prev + delta);
+    deltas.push({ name, delta, totalAfter: prev + delta });
   }
 
-  return (
-    <div style={outer} onClick={disabled ? undefined : onClick}>
-      {faceUp ? (
-        <CardFace card={forceFrontCard || slot.card} small={small} />
-      ) : (
-        <>
-          <div style={backPattern} />
-          <div
-            style={{
-              position: "absolute",
-              bottom: 8,
-              left: 10,
-              fontSize: small ? 10 : 12,
-              opacity: 0.9,
-              color: "white",
-              fontWeight: 900,
-              letterSpacing: 1,
-            }}
-          >
-            KARGO
-          </div>
-        </>
-      )}
-      {labelText && <div style={slotLabel}>{labelText}</div>}
-    </div>
-  );
-}
-
-/* ---------- Used pile stack ---------- */
-function UsedPileStack({ topCard, count }) {
-  const base = {
-    width: 86,
-    height: 122,
-    borderRadius: 14,
-    border: "1px solid rgba(17,24,39,0.35)",
-    background: "rgba(17,24,39,0.06)",
-    position: "absolute",
-    left: 0,
-    top: 0,
-  };
-
-  return (
-    <div style={{ position: "relative", width: 120, height: 150 }}>
-      <div style={{ ...base, left: 10, top: 12 }} />
-      <div style={{ ...base, left: 6, top: 8 }} />
-      <div style={{ ...base, left: 3, top: 4 }} />
-      <div style={{ position: "absolute", left: 0, top: 0 }}>
-        <PlayingCard slot={topCard ? { faceUp: true, card: topCard } : null} forceBack={!topCard} disabled={true} />
-      </div>
-      <div style={{ position: "absolute", left: 98, top: 10, fontSize: 12, opacity: 0.75 }}>
-        Used: <b>{count}</b>
-      </div>
-    </div>
-  );
-}
-
-export default function App() {
-  return (
-    <ErrorBoundary>
-      <AppInner />
-    </ErrorBoundary>
-  );
-}
-
-function AppInner() {
-  const socket = useMemo(() => {
-    if (!SERVER_URL) return null;
-    return io(SERVER_URL, { transports: ["websocket"] });
-  }, []);
-
-  const [connected, setConnected] = useState(false);
-  const [error, setError] = useState("");
-  const [room, setRoom] = useState(null);
-
-  const [name, setName] = useState("");
-  const [code, setCode] = useState("");
-
-  const [drawn, setDrawn] = useState(null);
-  const [powerPeek, setPowerPeek] = useState(null);
-  const [winnerSplash, setWinnerSplash] = useState(null);
-
-  const [turnToast, setTurnToast] = useState(false);
-  const prevTurnPidRef = useRef(null);
-
-  useEffect(() => {
-    if (!socket) return;
-
-    const onConnect = () => setConnected(true);
-    const onDisconnect = () => setConnected(false);
-    const onErr = (m) => setError(String(m || "Unknown error"));
-
-    const onUpdate = (r) => {
-      setRoom(r);
-      setError("");
-
-      if (r?.phase !== "playing") setDrawn(null);
-
-      if (r?.lastRound?.winnerName) {
-        setWinnerSplash({ name: r.lastRound.winnerName });
-        setTimeout(() => setWinnerSplash(null), 2500);
-      }
-
-      // your turn popup
-      const myId = socket.id;
-      const prevTurn = prevTurnPidRef.current;
-      const curTurn = r?.turnPlayerId ?? null;
-      if (myId && curTurn === myId && prevTurn !== myId && r?.phase === "playing") {
-        setTurnToast(true);
-        setTimeout(() => setTurnToast(false), 1400);
-      }
-      prevTurnPidRef.current = curTurn;
-    };
-
-    const onDrawn = (c) => {
-      setDrawn(c);
-      setError("");
-    };
-
-    const onPower = (payload) => {
-      if (!payload?.card) return;
-      if (payload.type === "peekSelf") setPowerPeek({ title: `Peek: your card`, card: payload.card });
-      if (payload.type === "peekOther") setPowerPeek({ title: `Peek: opponent card`, card: payload.card });
-      if (payload.type === "qPeekThenDecide") {
-        setPowerPeek({
-          title: `Q peeked card`,
-          card: payload.card,
-          qDecision: true,
-        });
-      }
-    };
-
-    socket.on("connect", onConnect);
-    socket.on("disconnect", onDisconnect);
-    socket.on("error:msg", onErr);
-    socket.on("room:update", onUpdate);
-    socket.on("turn:drawn", onDrawn);
-    socket.on("power:result", onPower);
-
-    return () => {
-      socket.off("connect", onConnect);
-      socket.off("disconnect", onDisconnect);
-      socket.off("error:msg", onErr);
-      socket.off("room:update", onUpdate);
-      socket.off("turn:drawn", onDrawn);
-      socket.off("power:result", onPower);
-      socket.disconnect();
-    };
-  }, [socket]);
-
-  const myId = socket?.id || null;
-
-  const players = room?.players || [];
-  const scoreboard = room?.scoreboard || [];
-  const stats = room?.stats || [];
-  const roundBoard = room?.roundBoard || null;
-
-  const me = players.find((p) => p.id === myId) || null;
-
-  const isHost = room?.hostId === myId;
-  const isMyTurn = room?.turnPlayerId === myId;
-
-  const kargoActive = !!room?.kargo;
-  const activeFinalPlayerId = room?.kargo?.activeFinalPlayerId ?? null;
-  const amIActiveFinal = kargoActive ? activeFinalPlayerId === myId : false;
-
-  const amIAllowedToAct = room?.phase === "playing" && (kargoActive ? amIActiveFinal : isMyTurn);
-
-  const inReadyPhase = room?.phase === "ready";
-  const readyMine = room?.readyState?.mine ?? false;
-
-  const powerMode = room?.powerState?.mode ?? "none";
-
-  const drawnRank = drawn?.rank ?? null;
-  const canPower = !!drawnRank && ["7", "8", "9", "10", "J", "Q"].includes(drawnRank);
-
-  // SLOT ORDER DISPLAY: top row = slot 2 & 3, bottom row = slot 0 & 1
-  const slotDisplayOrder = [2, 3, 0, 1];
-
-  if (!SERVER_URL) {
-    return (
-      <div style={page}>
-        <div style={cardWrap}>
-          <h2 style={{ marginTop: 0 }}>Missing VITE_SERVER_URL</h2>
-          <div>Set it in Vercel to your Render URL.</div>
-        </div>
-      </div>
-    );
+  for (const pid of room.order) {
+    const name = room.players.get(pid)?.name ?? "Unknown";
+    const st = room.stats.get(name) ?? { roundsPlayed: 0, roundsWon: 0 };
+    st.roundsPlayed += 1;
+    if (pid === winnerPid) st.roundsWon += 1;
+    room.stats.set(name, st);
   }
 
-  const roundSorted = roundBoard?.deltas
-    ? [...roundBoard.deltas].sort((a, b) => a.delta - b.delta)
+  room.lastRound = { winnerPid, winnerName, reason, endedAt: nowMs(), reveal: room.lastRoundReveal };
+  recordRoundBoard(room, deltas);
+  resetToLobby(room);
+}
+
+function endRoundAndScoreKargoCompare(room) {
+  const k = room.kargo;
+  if (!k) return;
+
+  // reveal snapshot BEFORE reset
+  room.lastRoundReveal = snapshotHands(room);
+
+  const callerId = k.callerId;
+  const callerName = room.players.get(callerId)?.name ?? k.callerName ?? "Caller";
+  const callerTotal = handTotal(room.hands.get(callerId) || []);
+
+  const totals = room.order.map((pid) => ({
+    pid,
+    name: room.players.get(pid)?.name ?? "Unknown",
+    total: handTotal(room.hands.get(pid) || []),
+  }));
+
+  const breakers = totals.filter((x) => x.pid !== callerId && x.total <= callerTotal);
+  const deltas = [];
+
+  if (breakers.length > 0) {
+    for (const t of totals) {
+      const prev = room.scoreboard.get(t.name) ?? 0;
+      let delta = 0;
+
+      if (t.pid === callerId) delta = +40;
+      else if (t.total <= callerTotal) delta = -10;
+      else delta = 0;
+
+      room.scoreboard.set(t.name, prev + delta);
+      deltas.push({ name: t.name, delta, totalAfter: prev + delta });
+    }
+
+    for (const pid of room.order) {
+      const name = room.players.get(pid)?.name ?? "Unknown";
+      const st = room.stats.get(name) ?? { roundsPlayed: 0, roundsWon: 0 };
+      st.roundsPlayed += 1;
+      room.stats.set(name, st);
+    }
+
+    room.lastRound = {
+      winnerPid: callerId,
+      winnerName: callerName,
+      reason: "kargo_broken_by_total",
+      endedAt: nowMs(),
+      reveal: room.lastRoundReveal,
+    };
+    recordRoundBoard(room, deltas);
+    resetToLobby(room);
+    return;
+  }
+
+  // success
+  for (const t of totals) {
+    const prev = room.scoreboard.get(t.name) ?? 0;
+    let delta = 0;
+
+    if (t.pid === callerId) delta = -20;
+    else delta = t.total;
+
+    room.scoreboard.set(t.name, prev + delta);
+    deltas.push({ name: t.name, delta, totalAfter: prev + delta });
+  }
+
+  for (const pid of room.order) {
+    const name = room.players.get(pid)?.name ?? "Unknown";
+    const st = room.stats.get(name) ?? { roundsPlayed: 0, roundsWon: 0 };
+    st.roundsPlayed += 1;
+    if (pid === callerId) st.roundsWon += 1;
+    room.stats.set(name, st);
+  }
+
+  room.lastRound = {
+    winnerPid: callerId,
+    winnerName: callerName,
+    reason: "kargo_success",
+    endedAt: nowMs(),
+    reveal: room.lastRoundReveal,
+  };
+  recordRoundBoard(room, deltas);
+  resetToLobby(room);
+}
+
+function maybeEndIfOut(room, pid) {
+  const hand = room.hands.get(pid) || [];
+  if (countCards(hand) !== 0) return false;
+
+  if (room.kargo && room.phase === "playing") {
+    const callerId = room.kargo.callerId;
+    const callerName = room.players.get(callerId)?.name ?? room.kargo.callerName ?? "Caller";
+    room.scoreboard.set(callerName, (room.scoreboard.get(callerName) ?? 0) + 40);
+    endRoundAndScoreStandard(room, pid, "kargo_broken_by_out");
+    return true;
+  }
+
+  endRoundAndScoreStandard(room, pid, "out");
+  return true;
+}
+
+/* -------------------- Turn & KARGO flow -------------------- */
+function startTurn(room, pid) {
+  room.turnStageBy.set(pid, "needDraw");
+  room.powerState.set(pid, { mode: "none" });
+}
+
+function buildFinalTurns(room, callerId) {
+  const order = room.order;
+  const start = room.turnIndex;
+  const afterCallerIndex = (start + 1) % order.length;
+  const finalTurns = [];
+  for (let i = 0; i < order.length; i++) {
+    const pid = order[(afterCallerIndex + i) % order.length];
+    if (pid !== callerId) finalTurns.push(pid);
+  }
+  return finalTurns;
+}
+
+function nextTurn(room) {
+  // Clear stage of whoever just ended
+  const prevPid = room.order[room.turnIndex];
+  if (prevPid) room.turnStageBy.set(prevPid, "needDraw");
+
+  if (room.kargo) {
+    room.kargo.index += 1;
+    if (room.kargo.index >= room.kargo.finalTurns.length) {
+      endRoundAndScoreKargoCompare(room);
+      return;
+    }
+    const nextPid = room.kargo.finalTurns[room.kargo.index];
+    room.turnIndex = room.order.indexOf(nextPid);
+    startTurn(room, nextPid);
+    return;
+  }
+
+  room.turnIndex = (room.turnIndex + 1) % room.order.length;
+  startTurn(room, room.order[room.turnIndex]);
+}
+
+function givePenaltyCard(room, pid) {
+  ensureDeck(room);
+  const c = room.deck.pop();
+  if (!c) return;
+  const hand = room.hands.get(pid) || [];
+  hand.push({ card: c });
+  room.hands.set(pid, hand);
+}
+
+/* -------------------- Ready gate -------------------- */
+function dealHands(room) {
+  const n = room.order.length;
+  room.deckCount = n <= 5 ? 2 : 3;
+  room.deck = makeDecks(room.deckCount);
+  room.usedPile = [];
+  room.usedWindow = null;
+
+  room.hands = new Map();
+  room.drawnBy = new Map();
+  room.turnStageBy = new Map();
+  room.ready = new Map();
+  room.powerState = new Map();
+
+  for (const pid of room.order) {
+    const c0 = room.deck.pop();
+    const c1 = room.deck.pop();
+    const c2 = room.deck.pop();
+    const c3 = room.deck.pop();
+    room.hands.set(pid, [{ card: c0 }, { card: c1 }, { card: c2 }, { card: c3 }]);
+    room.ready.set(pid, false);
+    room.turnStageBy.set(pid, "needDraw");
+    room.powerState.set(pid, { mode: "none" });
+  }
+
+  room.turnIndex = 0;
+  room.readyGateOpen = true;
+  room.phase = "ready";
+}
+
+function allReady(room) {
+  for (const pid of room.order) if (!room.ready.get(pid)) return false;
+  return true;
+}
+
+function closeReadyGate(room) {
+  room.readyGateOpen = false;
+  room.phase = "playing";
+  startTurn(room, room.order[room.turnIndex]);
+}
+
+/* -------------------- Public room view -------------------- */
+function publicRoomView(room, viewerId) {
+  tickUsedWindow(room);
+
+  const activeUsedCard = room.usedWindow?.card ?? null;
+  const usedPileTop = room.usedPile.length ? room.usedPile[room.usedPile.length - 1] : null;
+
+  const k = room.kargo
+    ? {
+        callerId: room.kargo.callerId,
+        callerName: room.kargo.callerName,
+        activeFinalPlayerId: room.kargo.finalTurns[room.kargo.index] ?? null,
+      }
     : null;
 
-  return (
-    <div style={page}>
-      <style>{`
-        @keyframes pop {
-          0% { transform: translateY(12px) scale(0.96); opacity: 0; }
-          60% { transform: translateY(0px) scale(1.02); opacity: 1; }
-          100% { transform: translateY(0px) scale(1); opacity: 1; }
+  const readyState =
+    room.phase === "ready"
+      ? {
+          readyGateOpen: true,
+          mine: !!room.ready.get(viewerId),
+          all: room.order.map((pid) => ({
+            id: pid,
+            name: room.players.get(pid)?.name ?? "Unknown",
+            ready: !!room.ready.get(pid),
+          })),
         }
-        @keyframes shimmer {
-          0% { background-position: 0% 50%; }
-          100% { background-position: 100% 50%; }
+      : null;
+
+  const ps = room.powerState.get(viewerId) || { mode: "none" };
+  const stage = room.turnStageBy.get(room.order[room.turnIndex] || "") || "needDraw";
+
+  return {
+    code: room.code,
+    hostId: room.hostId,
+    phase: room.phase,
+    turnPlayerId: room.order[room.turnIndex] ?? null,
+    turnStage: stage,
+
+    thrownCard: activeUsedCard,
+    usedPileTop,
+    usedPileCount: room.usedPile.length,
+
+    lastRound: room.lastRound ?? null,
+    roundBoard: room.roundBoard ?? null,
+    kargo: k,
+    readyState,
+    powerState: ps,
+
+    players: room.order.map((pid) => {
+      const name = room.players.get(pid)?.name ?? "Unknown";
+      const hand = room.hands.get(pid) || [];
+      const slots = hand.map((slot, idx) => {
+        if (!slot) return null;
+
+        // READY: show slot0/1 once to viewer if not yet ready
+        if (room.phase === "ready" && pid === viewerId && !room.ready.get(viewerId)) {
+          if (idx === 0 || idx === 1) return { faceUp: true, card: slot.card };
+          return { faceUp: false, card: null };
         }
-        @keyframes toast {
-          0% { transform: translateY(-10px); opacity: 0; }
-          25% { transform: translateY(0px); opacity: 1; }
-          75% { transform: translateY(0px); opacity: 1; }
-          100% { transform: translateY(-10px); opacity: 0; }
-        }
-      `}</style>
 
-      {/* your turn popup */}
-      {turnToast && (
-        <div style={toastWrap}>
-          <div style={toastCard}>Your turn</div>
-        </div>
-      )}
+        // PLAY: always hidden
+        return { faceUp: false, card: null };
+      });
 
-      <div style={header}>
-        <div>
-          <h1 style={{ margin: 0 }}>KARGO</h1>
-          <div style={{ fontSize: 12, opacity: 0.6 }}>
-            Always hidden • 7/8 peek only • 9/10 peek other • J unseen swap • Q seen swap
-          </div>
-          <div style={{ opacity: 0.75, fontSize: 13 }}>
-            {connected ? "connected" : "disconnected"} • Server: {SERVER_URL}
-          </div>
-        </div>
+      return { id: pid, name, cardCount: countCards(hand), slots };
+    }),
 
-        {room && (
-          <button
-            style={btnGhost}
-            onClick={() => {
-              socket.emit("room:leave", { code: room.code });
-              setRoom(null);
-              setDrawn(null);
-            }}
-          >
-            Leave room
-          </button>
-        )}
-      </div>
-
-      {!room ? (
-        <div style={cardWrap}>
-          <h2 style={{ marginTop: 0 }}>Join your friends</h2>
-
-          <div style={row}>
-            <label style={label}>Your name</label>
-            <input style={input} value={name} onChange={(e) => setName(e.target.value)} placeholder="Dhaval" />
-          </div>
-
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
-            <button style={btn} disabled={!name.trim() || !connected} onClick={() => socket.emit("room:create", { name: name.trim() })}>
-              Create room
-            </button>
-
-            <input style={{ ...input, width: 160 }} value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} placeholder="ROOM CODE" />
-
-            <button
-              style={btn}
-              disabled={!name.trim() || !code.trim() || !connected}
-              onClick={() => socket.emit("room:join", { code: code.trim(), name: name.trim() })}
-            >
-              Join room
-            </button>
-          </div>
-
-          {error && <div style={errorBox}>{error}</div>}
-        </div>
-      ) : (
-        <>
-          {winnerSplash && (
-            <div style={winnerOverlay}>
-              <div style={winnerCard}>
-                <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6 }}>Round Winner</div>
-                <div style={winnerName}>{winnerSplash.name}</div>
-              </div>
-            </div>
-          )}
-
-          {/* SCOREBOARDS */}
-          <div style={cardWrap}>
-            <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
-              <div>
-                <div style={{ opacity: 0.75, fontSize: 13 }}>Room code</div>
-                <div style={{ fontSize: 26, fontWeight: 900, letterSpacing: 2 }}>{room.code}</div>
-                <div style={{ opacity: 0.75, fontSize: 13, marginTop: 6 }}>
-                  Phase: <b>{room.phase}</b> • Turn: <b>{players.find((p) => p.id === room.turnPlayerId)?.name ?? "—"}</b>
-                </div>
-                {room.kargo && (
-                  <div style={{ marginTop: 10, padding: 10, borderRadius: 12, border: "1px solid #fde68a", background: "#fffbeb" }}>
-                    <div style={{ fontWeight: 900 }}>KARGO called by {room.kargo.callerName}</div>
-                    <div style={{ fontSize: 12, opacity: 0.75 }}>
-                      Final player: <b>{players.find((p) => p.id === room.kargo.activeFinalPlayerId)?.name ?? "—"}</b>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Round board */}
-              <div style={{ minWidth: 260 }}>
-                <div style={{ opacity: 0.75, fontSize: 13 }}>Scoreboard (This round)</div>
-                {!roundSorted ? (
-                  <div style={{ marginTop: 6, fontSize: 12, opacity: 0.6 }}>No completed round yet.</div>
-                ) : (
-                  <div style={{ display: "grid", gap: 6, marginTop: 6 }}>
-                    {roundSorted.map((s) => (
-                      <div key={s.name} style={scoreRow}>
-                        <span>{s.name}</span>
-                        <b>{s.delta > 0 ? `+${s.delta}` : s.delta}</b>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* Total points board */}
-              <div style={{ minWidth: 260 }}>
-                <div style={{ opacity: 0.75, fontSize: 13 }}>Scoreboard (Total points)</div>
-                <div style={{ display: "grid", gap: 6, marginTop: 6 }}>
-                  {scoreboard
-                    .slice()
-                    .sort((a, b) => a.score - b.score)
-                    .map((s) => (
-                      <div key={s.name} style={scoreRow}>
-                        <span>{s.name}</span>
-                        <b>{s.score}</b>
-                      </div>
-                    ))}
-                </div>
-              </div>
-
-              {/* Total games played */}
-              <div style={{ minWidth: 260 }}>
-                <div style={{ opacity: 0.75, fontSize: 13 }}>Scoreboard (Games/rounds)</div>
-                <div style={{ display: "grid", gap: 6, marginTop: 6 }}>
-                  {stats
-                    .slice()
-                    .sort((a, b) => b.roundsWon - a.roundsWon)
-                    .map((s) => (
-                      <div key={s.name} style={scoreRow}>
-                        <span>{s.name}</span>
-                        <span style={{ fontSize: 12, opacity: 0.75 }}>
-                          Played <b>{s.roundsPlayed}</b> • Won <b>{s.roundsWon}</b>
-                        </span>
-                      </div>
-                    ))}
-                </div>
-              </div>
-            </div>
-
-            {room.phase === "lobby" && (
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 14 }}>
-                <button style={btn} disabled={!isHost || players.length < 2} onClick={() => socket.emit("game:start", { code: room.code })}>
-                  Start game
-                </button>
-                {!isHost && <div style={{ opacity: 0.75, fontSize: 13, alignSelf: "center" }}>Waiting for host…</div>}
-              </div>
-            )}
-
-            {/* READY PHASE: show ONLY bottom 2 cards (slot 0,1) once, top are hidden */}
-            {inReadyPhase && (
-              <div style={{ marginTop: 12, padding: 12, borderRadius: 12, border: "1px solid #e5e7eb", background: "#f8fafc" }}>
-                <div style={{ fontWeight: 900 }}>Ready check</div>
-                <div style={{ fontSize: 13, opacity: 0.75, marginTop: 6 }}>
-                  This is your only chance to see your bottom two cards (slot 0 & slot 1). When you hit Ready, they hide again.
-                </div>
-
-                {/* 2x2 layout with correct ordering: top row slots 2,3 and bottom row slots 0,1 */}
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(2, max-content)", gap: 12, marginTop: 12 }}>
-                  {slotDisplayOrder.map((slotIndex) => {
-                    const s = me?.slots?.[slotIndex] ?? null;
-
-                    // server sends bottom slots faceUp+card until you press ready; top slots always hidden
-                    const forceFrontCard = s?.faceUp ? s?.card : null;
-
-                    return (
-                      <PlayingCard
-                        key={slotIndex}
-                        slot={s && !forceFrontCard ? { faceUp: false, card: null } : s}
-                        forceFrontCard={forceFrontCard}
-                        forceBack={!s}
-                        disabled={true}
-                        labelText={`slot ${slotIndex}`}
-                      />
-                    );
-                  })}
-                </div>
-
-                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 12 }}>
-                  <button style={btn} disabled={readyMine} onClick={() => socket.emit("game:ready", { code: room.code })}>
-                    {readyMine ? "Ready ✅" : "Ready"}
-                  </button>
-                </div>
-
-                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
-                  {(room.readyState?.all || []).map((p) => (
-                    <div key={p.id} style={{ fontSize: 13, opacity: 0.8 }}>
-                      {p.name}: <b>{p.ready ? "Ready" : "Not ready"}</b>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {error && <div style={errorBox}>{error}</div>}
-          </div>
-
-          {/* Playing UI */}
-          {room.phase === "playing" && (
-            <div style={cardWrap}>
-              <h3 style={{ marginTop: 0 }}>Center</h3>
-
-              <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
-                <div>
-                  <div style={{ opacity: 0.75, fontSize: 13, marginBottom: 6 }}>Active used card (race claim)</div>
-
-                  {/* Fix #6: if no active card, show facedown card */}
-                  <PlayingCard
-                    slot={room.thrownCard ? { faceUp: true, card: room.thrownCard } : null}
-                    forceBack={!room.thrownCard}
-                    disabled={true}
-                  />
-
-                  <div style={{ maxWidth: 280, fontSize: 12, opacity: 0.75, lineHeight: 1.35, marginTop: 8 }}>
-                    Wrong claim = +1 unseen penalty card.
-                  </div>
-                </div>
-
-                <div style={{ flex: 1, minWidth: 260 }}>
-                  <div style={{ opacity: 0.75, fontSize: 13, marginBottom: 6 }}>Used pile</div>
-                  <UsedPileStack topCard={room.usedPileTop} count={room.usedPileCount || 0} />
-                </div>
-
-                <div style={{ flex: 1, minWidth: 460 }}>
-                  <div style={{ opacity: 0.75, fontSize: 13, marginBottom: 6 }}>
-                    Actions {kargoActive ? "(final turns)" : ""}{" "}
-                    {amIAllowedToAct ? "" : <span style={{ opacity: 0.7 }}>• waiting…</span>}
-                  </div>
-
-                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                    <button style={btn} disabled={!amIAllowedToAct || !!drawn} onClick={() => socket.emit("turn:draw", { code: room.code })}>
-                      Draw
-                    </button>
-
-                    <button
-                      style={btnGhost}
-                      disabled={!amIAllowedToAct || !drawn}
-                      onClick={() => {
-                        // Fix #3: click drawn card again to discard to used pile
-                        socket.emit("turn:discardDrawn", { code: room.code });
-                        setDrawn(null);
-                      }}
-                      title="Discard the drawn card to used pile and end your turn"
-                    >
-                      Discard drawn
-                    </button>
-
-                    <button
-                      style={btnGhost}
-                      disabled={!amIAllowedToAct || !drawn || !canPower}
-                      onClick={() => socket.emit("power:useOnce", { code: room.code })}
-                      title="Uses power ONCE and consumes the drawn power card"
-                    >
-                      Use Power
-                    </button>
-
-                    {/* Fix #7: Allow kargo even after drawn/swapped/etc (server now allows; if you have drawn pending it gets discarded automatically) */}
-                    <button style={btnGhost} disabled={!amIAllowedToAct || kargoActive} onClick={() => socket.emit("kargo:call", { code: room.code })}>
-                      Call KARGO
-                    </button>
-                  </div>
-
-                  <div style={{ marginTop: 14, padding: 12, borderRadius: 12, border: "1px solid #e5e7eb" }}>
-                    <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
-                      <div style={{ fontWeight: 900 }}>Drawn:</div>
-
-                      {/* Fix #3 also: clicking drawn card itself discards */}
-                      <PlayingCard
-                        slot={drawn ? { faceUp: true, card: drawn } : null}
-                        forceBack={!drawn}
-                        disabled={!drawn || !amIAllowedToAct}
-                        onClick={() => {
-                          if (!drawn || !amIAllowedToAct) return;
-                          socket.emit("turn:discardDrawn", { code: room.code });
-                          setDrawn(null);
-                        }}
-                      />
-
-                      <div style={{ fontSize: 12, opacity: 0.7, maxWidth: 360 }}>
-                        Tap one of your cards to resolve:
-                        <ul style={{ margin: "6px 0 0 18px" }}>
-                          <li>Match rank → discard both</li>
-                          <li>No match → swap (no penalty)</li>
-                        </ul>
-                        Power is single-use via <b>Use Power</b>. Cards remain hidden after actions.
-                      </div>
-                    </div>
-
-                    {powerMode !== "none" && (
-                      <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
-                        Power mode: <b>{powerMode}</b>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              {/* Your hand (always hidden) */}
-              <div style={{ marginTop: 16 }}>
-                <h3 style={{ marginTop: 0 }}>Your hand</h3>
-
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(2, max-content)", gap: 12 }}>
-                  {slotDisplayOrder.map((i) => {
-                    const slot = me?.slots?.[i] ?? null;
-                    const hasCard = !!slot;
-
-                    return (
-                      <PlayingCard
-                        key={i}
-                        // Always hidden during play
-                        slot={hasCard ? { faceUp: false, card: null } : null}
-                        forceBack={hasCard}
-                        labelText={`slot ${i}`}
-                        disabled={!amIAllowedToAct || (!room.thrownCard && !drawn && !["selfPeekPick", "jPickMyCard", "qPickMyCard"].includes(powerMode))}
-                        onClick={() => {
-                          if (!amIAllowedToAct) return;
-
-                          // power selection steps
-                          if (powerMode === "selfPeekPick") {
-                            socket.emit("power:tapSelfCard", { code: room.code, slotIndex: i });
-                            return;
-                          }
-                          if (powerMode === "jPickMyCard") {
-                            socket.emit("power:tapMyCardForSwap", { code: room.code, mySlotIndex: i });
-                            return;
-                          }
-                          if (powerMode === "qPickMyCard") {
-                            socket.emit("power:tapMyCardForQ", { code: room.code, mySlotIndex: i });
-                            return;
-                          }
-
-                          // normal draw resolution
-                          if (drawn) {
-                            socket.emit("turn:resolveDrawTap", { code: room.code, slotIndex: i });
-                            setDrawn(null);
-                            return;
-                          }
-
-                          // race claim
-                          if (room.thrownCard) {
-                            socket.emit("used:claim", { code: room.code, slotIndex: i });
-                            return;
-                          }
-                        }}
-                      />
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Opponents (always hidden) */}
-              <div style={{ marginTop: 18 }}>
-                <h3 style={{ marginTop: 0 }}>Opponents</h3>
-                <div style={{ display: "grid", gap: 12 }}>
-                  {players
-                    .filter((p) => p.id !== myId)
-                    .map((p) => (
-                      <div key={p.id} style={{ padding: 12, borderRadius: 12, border: "1px solid #e5e7eb" }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                          <b>{p.name}</b>
-                          <span style={{ fontSize: 13, opacity: 0.7 }}>{p.cardCount} cards</span>
-                        </div>
-
-                        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
-                          {[0, 1, 2, 3].map((idx) => {
-                            const hasCard = !!(p.slots?.[idx]);
-                            return (
-                              <PlayingCard
-                                key={idx}
-                                slot={hasCard ? { faceUp: false, card: null } : null}
-                                forceBack={hasCard}
-                                labelText={`slot ${idx}`}
-                                disabled={
-                                  !amIAllowedToAct ||
-                                  !hasCard ||
-                                  !["otherPeekPick", "jPickOpponentCard", "qPickOpponentCard"].includes(powerMode)
-                                }
-                                onClick={() =>
-                                  socket.emit("power:tapOtherCard", {
-                                    code: room.code,
-                                    otherPlayerId: p.id,
-                                    otherSlotIndex: idx,
-                                  })
-                                }
-                              />
-                            );
-                          })}
-                        </div>
-
-                        <div style={{ marginTop: 8, fontSize: 12, opacity: 0.6 }}>
-                          9/10: Use Power → tap opponent card (peek) • J/Q: select your card then opponent card
-                        </div>
-                      </div>
-                    ))}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Players list */}
-          <div style={cardWrap}>
-            <h3 style={{ marginTop: 0 }}>Players</h3>
-            <div style={{ display: "grid", gap: 8 }}>
-              {players.map((p) => (
-                <div key={p.id} style={playerRow}>
-                  <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                    <span style={dot(p.id === room.turnPlayerId ? "#22c55e" : "#9ca3af")} />
-                    <b>{p.name}</b>
-                    {p.id === room.hostId && <span style={pill}>HOST</span>}
-                    {p.id === myId && <span style={pill2}>YOU</span>}
-                  </div>
-                  <div style={{ opacity: 0.75, fontSize: 13 }}>{p.cardCount} cards</div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Peek / Q decision modal */}
-          {powerPeek && (
-            <div style={modalBackdrop} onClick={() => setPowerPeek(null)}>
-              <div style={modalCard} onClick={(e) => e.stopPropagation()}>
-                <div style={{ fontWeight: 900, marginBottom: 10 }}>{powerPeek.title}</div>
-                <PlayingCard slot={{ faceUp: true, card: powerPeek.card }} disabled={true} />
-                {powerPeek.qDecision ? (
-                  <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
-                    <button
-                      style={btn}
-                      onClick={() => {
-                        socket.emit("power:qDecision", { code: room.code, accept: true });
-                        setPowerPeek(null);
-                      }}
-                    >
-                      Swap
-                    </button>
-                    <button
-                      style={btnGhost}
-                      onClick={() => {
-                        socket.emit("power:qDecision", { code: room.code, accept: false });
-                        setPowerPeek(null);
-                      }}
-                    >
-                      Don’t swap
-                    </button>
-                  </div>
-                ) : (
-                  <button style={{ ...btn, marginTop: 14 }} onClick={() => setPowerPeek(null)}>
-                    Close
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-        </>
-      )}
-    </div>
-  );
+    scoreboard: Array.from(room.scoreboard.entries()).map(([name, score]) => ({ name, score })),
+    stats: Array.from(room.stats.entries()).map(([name, st]) => ({ name, ...st })),
+  };
 }
 
-/* ---------- styles ---------- */
-function dot(color) {
-  return { width: 10, height: 10, borderRadius: 999, background: color, display: "inline-block" };
+function broadcastRoom(room) {
+  tickUsedWindow(room);
+  for (const pid of room.order) io.to(pid).emit("room:update", publicRoomView(room, pid));
 }
 
-const page = {
-  fontFamily: "system-ui, -apple-system, Segoe UI, Roboto",
-  maxWidth: 1300,
-  margin: "0 auto",
-  padding: 18,
-  display: "grid",
-  gap: 12,
-  background: "#f8fafc",
-  minHeight: "100vh",
-};
+/* -------------------- Power handling -------------------- */
+function consumeDrawnToUsed(room, pid) {
+  const drawn = room.drawnBy.get(pid);
+  if (!drawn) return null;
+  room.usedPile.push(drawn); // goes to USED pile, NOT active thrown window
+  room.drawnBy.delete(pid);
+  return drawn;
+}
 
-const header = {
-  display: "flex",
-  justifyContent: "space-between",
-  alignItems: "center",
-  flexWrap: "wrap",
-  gap: 12,
-};
+function actingGuard(room, socket) {
+  if (room.phase !== "playing") return "Not in playing phase";
+  if (room.kargo) {
+    const activeFinal = room.kargo.finalTurns[room.kargo.index] ?? null;
+    if (activeFinal !== socket.id) return "Not your final turn";
+  } else {
+    if (room.order[room.turnIndex] !== socket.id) return "Not your turn";
+  }
+  return null;
+}
 
-const cardWrap = {
-  border: "1px solid #e5e7eb",
-  borderRadius: 16,
-  padding: 16,
-  background: "white",
-};
+/* -------------------- Socket handlers -------------------- */
+io.on("connection", (socket) => {
+  socket.on("room:create", ({ name }) => {
+    const code = makeRoomCode();
+    const room = {
+      code,
+      hostId: socket.id,
+      players: new Map(),
+      order: [],
+      scoreboard: new Map(),
+      stats: new Map(),
+      phase: "lobby",
 
-const row = { display: "grid", gap: 6 };
-const label = { fontSize: 13, opacity: 0.75 };
+      deckCount: 2,
+      deck: [],
+      usedPile: [],
+      usedWindow: null,
 
-const input = {
-  padding: "10px 12px",
-  borderRadius: 12,
-  border: "1px solid #d1d5db",
-  width: 260,
-  outline: "none",
-};
+      hands: new Map(),
+      turnIndex: 0,
+      drawnBy: new Map(),
+      turnStageBy: new Map(),
 
-const btn = {
-  padding: "10px 12px",
-  borderRadius: 12,
-  border: "1px solid #111827",
-  background: "#111827",
-  color: "white",
-  cursor: "pointer",
-  fontWeight: 800,
-};
+      ready: new Map(),
+      readyGateOpen: false,
 
-const btnGhost = {
-  padding: "10px 12px",
-  borderRadius: 12,
-  border: "1px solid #d1d5db",
-  background: "white",
-  cursor: "pointer",
-  fontWeight: 800,
-};
+      kargo: null,
+      powerState: new Map(),
 
-const errorBox = {
-  marginTop: 12,
-  padding: 10,
-  borderRadius: 12,
-  border: "1px solid #fecaca",
-  background: "#fff1f2",
-  color: "#9f1239",
-  fontSize: 13,
-};
+      lastRound: null,
+      roundBoard: null,
+      lastRoundReveal: null,
+    };
 
-const playerRow = {
-  display: "flex",
-  justifyContent: "space-between",
-  alignItems: "center",
-  padding: "10px 12px",
-  borderRadius: 12,
-  border: "1px solid #e5e7eb",
-};
+    rooms.set(code, room);
 
-const scoreRow = {
-  display: "flex",
-  justifyContent: "space-between",
-  padding: "8px 10px",
-  borderRadius: 12,
-  border: "1px solid #e5e7eb",
-};
+    room.players.set(socket.id, { id: socket.id, name });
+    room.order.push(socket.id);
+    room.scoreboard.set(name, 0);
+    room.stats.set(name, { roundsPlayed: 0, roundsWon: 0 });
 
-const pill = {
-  fontSize: 11,
-  padding: "2px 8px",
-  borderRadius: 999,
-  background: "#eef2ff",
-  border: "1px solid #c7d2fe",
-  color: "#3730a3",
-  fontWeight: 900,
-};
+    socket.join(code);
+    broadcastRoom(room);
+  });
 
-const pill2 = {
-  fontSize: 11,
-  padding: "2px 8px",
-  borderRadius: 999,
-  background: "#ecfeff",
-  border: "1px solid #a5f3fc",
-  color: "#155e75",
-  fontWeight: 900,
-};
+  socket.on("room:join", ({ code, name }) => {
+    const room = rooms.get(code);
+    if (!room) return socket.emit("error:msg", "Room not found");
+    if (room.phase !== "lobby") return socket.emit("error:msg", "Game already started");
+    if (room.order.length >= 8) return socket.emit("error:msg", "Room full (max 8)");
 
-const modalBackdrop = {
-  position: "fixed",
-  inset: 0,
-  background: "rgba(0,0,0,0.35)",
-  display: "grid",
-  placeItems: "center",
-  zIndex: 50,
-};
+    room.players.set(socket.id, { id: socket.id, name });
+    room.order.push(socket.id);
+    if (!room.scoreboard.has(name)) room.scoreboard.set(name, 0);
+    if (!room.stats.has(name)) room.stats.set(name, { roundsPlayed: 0, roundsWon: 0 });
 
-const modalCard = {
-  background: "white",
-  borderRadius: 16,
-  border: "1px solid #e5e7eb",
-  padding: 16,
-  width: 300,
-  boxShadow: "0 20px 60px rgba(0,0,0,0.25)",
-};
+    socket.join(code);
+    broadcastRoom(room);
+  });
 
-const winnerOverlay = {
-  position: "fixed",
-  inset: 0,
-  display: "grid",
-  placeItems: "start center",
-  pointerEvents: "none",
-  zIndex: 60,
-};
+  socket.on("room:leave", ({ code }) => {
+    const room = rooms.get(code);
+    if (!room) return;
 
-const winnerCard = {
-  marginTop: 18,
-  padding: "12px 16px",
-  borderRadius: 16,
-  border: "1px solid rgba(17,24,39,0.15)",
-  background: "linear-gradient(90deg, #ffffff, #f8fafc, #ffffff)",
-  backgroundSize: "200% 200%",
-  animation: "pop 350ms ease-out, shimmer 1200ms linear infinite",
-  boxShadow: "0 18px 50px rgba(0,0,0,0.18)",
-};
+    room.players.delete(socket.id);
+    room.order = room.order.filter((id) => id !== socket.id);
+    room.hands.delete(socket.id);
+    room.drawnBy.delete(socket.id);
+    room.turnStageBy.delete(socket.id);
+    room.ready.delete(socket.id);
+    room.powerState.delete(socket.id);
 
-const winnerName = {
-  fontSize: 22,
-  fontWeight: 1000,
-  letterSpacing: 0.5,
-};
+    if (room.order.length === 0) {
+      rooms.delete(code);
+      return;
+    }
+    if (room.hostId === socket.id) room.hostId = room.order[0];
+    room.turnIndex = Math.min(room.turnIndex, room.order.length - 1);
 
-const toastWrap = {
-  position: "fixed",
-  top: 16,
-  left: 0,
-  right: 0,
-  display: "grid",
-  placeItems: "center",
-  zIndex: 80,
-  pointerEvents: "none",
-};
+    broadcastRoom(room);
+  });
 
-const toastCard = {
-  padding: "10px 14px",
-  borderRadius: 999,
-  border: "1px solid rgba(17,24,39,0.15)",
-  background: "rgba(255,255,255,0.95)",
-  boxShadow: "0 14px 40px rgba(0,0,0,0.18)",
-  fontWeight: 900,
-  animation: "toast 1400ms ease-out",
-};
+  socket.on("game:start", ({ code }) => {
+    const room = rooms.get(code);
+    if (!room) return;
+    if (room.hostId !== socket.id) return socket.emit("error:msg", "Only host can start");
+    if (room.order.length < 2) return socket.emit("error:msg", "Need at least 2 players");
+
+    dealHands(room);
+    broadcastRoom(room);
+  });
+
+  socket.on("game:ready", ({ code }) => {
+    const room = rooms.get(code);
+    if (!room || room.phase !== "ready") return;
+    if (!room.ready.has(socket.id)) return;
+
+    room.ready.set(socket.id, true);
+
+    if (allReady(room)) closeReadyGate(room);
+    broadcastRoom(room);
+  });
+
+  // CALL KARGO: allowed any time on your turn (needDraw/hasDrawn/awaitEnd).
+  // If you have a drawn card pending, it is moved to USED pile first.
+  socket.on("kargo:call", ({ code }) => {
+    const room = rooms.get(code);
+    if (!room || room.phase !== "playing") return;
+    if (room.kargo) return socket.emit("error:msg", "KARGO already called");
+
+    const guard = actingGuard(room, socket);
+    if (guard) return socket.emit("error:msg", guard);
+
+    consumeDrawnToUsed(room, socket.id); // keep it simple/clear
+
+    const callerName = room.players.get(socket.id)?.name ?? "Caller";
+    room.kargo = {
+      callerId: socket.id,
+      callerName,
+      calledAt: nowMs(),
+      finalTurns: buildFinalTurns(room, socket.id),
+      index: -1,
+    };
+
+    // caller's turn effectively ends when they call Kargo
+    nextTurn(room);
+    broadcastRoom(room);
+  });
+
+  // Draw: only if stage is needDraw
+  socket.on("turn:draw", ({ code }) => {
+    const room = rooms.get(code);
+    if (!room) return;
+
+    const guard = actingGuard(room, socket);
+    if (guard) return socket.emit("error:msg", guard);
+
+    const stage = room.turnStageBy.get(socket.id) || "needDraw";
+    if (stage !== "needDraw") return socket.emit("error:msg", "You cannot draw right now");
+
+    ensureDeck(room);
+    const drawn = room.deck.pop();
+    if (!drawn) return socket.emit("error:msg", "Deck empty");
+
+    room.drawnBy.set(socket.id, drawn);
+    room.turnStageBy.set(socket.id, "hasDrawn");
+    room.powerState.set(socket.id, { mode: "none" });
+
+    socket.emit("turn:drawn", drawn);
+    broadcastRoom(room);
+  });
+
+  // Discard drawn: moves drawn to USED pile, stage -> awaitEnd (does NOT auto-end turn)
+  socket.on("turn:discardDrawn", ({ code }) => {
+    const room = rooms.get(code);
+    if (!room) return;
+
+    const guard = actingGuard(room, socket);
+    if (guard) return socket.emit("error:msg", guard);
+
+    const stage = room.turnStageBy.get(socket.id) || "needDraw";
+    if (stage !== "hasDrawn") return socket.emit("error:msg", "No drawn card to discard");
+
+    const drawn = consumeDrawnToUsed(room, socket.id);
+    if (!drawn) return socket.emit("error:msg", "No drawn card");
+
+    room.turnStageBy.set(socket.id, "awaitEnd");
+    broadcastRoom(room);
+  });
+
+  // Tap-to-resolve draw on a slot:
+  // - match rank: discard both to USED, slot becomes empty
+  // - else: swap and the replaced card becomes the ACTIVE thrown card window (race claim)
+  // After action: stage -> awaitEnd (does NOT auto-end turn)
+  socket.on("turn:resolveDrawTap", ({ code, slotIndex }) => {
+    const room = rooms.get(code);
+    if (!room) return;
+
+    const guard = actingGuard(room, socket);
+    if (guard) return socket.emit("error:msg", guard);
+
+    const stage = room.turnStageBy.get(socket.id) || "needDraw";
+    if (stage !== "hasDrawn") return socket.emit("error:msg", "You must draw first");
+
+    const drawn = room.drawnBy.get(socket.id);
+    if (!drawn) return socket.emit("error:msg", "No drawn card");
+
+    const hand = room.hands.get(socket.id) || [];
+    const slot = hand[slotIndex];
+    if (!slot) return socket.emit("error:msg", "Empty slot");
+
+    if (slot.card.rank === drawn.rank) {
+      room.usedPile.push(drawn);
+      room.usedPile.push(slot.card);
+      hand[slotIndex] = null;
+      room.drawnBy.delete(socket.id);
+
+      if (maybeEndIfOut(room, socket.id)) return broadcastRoom(room);
+
+      room.turnStageBy.set(socket.id, "awaitEnd");
+      broadcastRoom(room);
+      return;
+    }
+
+    // swap: drawn goes into slot, replaced card becomes active thrown card for race claim
+    const replaced = slot.card;
+    hand[slotIndex] = { card: drawn };
+    room.drawnBy.delete(socket.id);
+
+    room.usedWindow = { state: "open", openedAt: nowMs(), card: replaced };
+
+    if (maybeEndIfOut(room, socket.id)) return broadcastRoom(room);
+
+    room.turnStageBy.set(socket.id, "awaitEnd");
+    broadcastRoom(room);
+  });
+
+  // Pair throw: select TWO of your slots while you have a drawn card.
+  // If same rank => discard both to USED, and you MUST keep drawn card (placed into first slot).
+  // If not same rank => penalty +1 card (unseen) and nothing discarded.
+  socket.on("turn:discardPair", ({ code, a, b }) => {
+    const room = rooms.get(code);
+    if (!room) return;
+
+    const guard = actingGuard(room, socket);
+    if (guard) return socket.emit("error:msg", guard);
+
+    const stage = room.turnStageBy.get(socket.id) || "needDraw";
+    if (stage !== "hasDrawn") return socket.emit("error:msg", "You must draw first to throw a pair");
+
+    const drawn = room.drawnBy.get(socket.id);
+    if (!drawn) return socket.emit("error:msg", "No drawn card");
+
+    const hand = room.hands.get(socket.id) || [];
+    const sa = hand[a];
+    const sb = hand[b];
+    if (!sa || !sb) return socket.emit("error:msg", "Both selected slots must have cards");
+    if (a === b) return socket.emit("error:msg", "Pick two different slots");
+
+    if (sa.card.rank !== sb.card.rank) {
+      // wrong pair => penalty
+      givePenaltyCard(room, socket.id);
+      broadcastRoom(room);
+      return;
+    }
+
+    // correct pair: discard both to USED
+    room.usedPile.push(sa.card);
+    room.usedPile.push(sb.card);
+
+    // keep drawn: place into slot a, clear slot b
+    hand[a] = { card: drawn };
+    hand[b] = null;
+
+    room.drawnBy.delete(socket.id);
+
+    if (maybeEndIfOut(room, socket.id)) return broadcastRoom(room);
+
+    room.turnStageBy.set(socket.id, "awaitEnd");
+    broadcastRoom(room);
+  });
+
+  // End Turn: only when stage is awaitEnd
+  socket.on("turn:end", ({ code }) => {
+    const room = rooms.get(code);
+    if (!room) return;
+
+    const guard = actingGuard(room, socket);
+    if (guard) return socket.emit("error:msg", guard);
+
+    const stage = room.turnStageBy.get(socket.id) || "needDraw";
+    if (stage !== "awaitEnd") return socket.emit("error:msg", "Finish your action first");
+
+    // clear power mode if any
+    room.powerState.set(socket.id, { mode: "none" });
+
+    nextTurn(room);
+    broadcastRoom(room);
+  });
+
+  /* -------------------- Power (single-use) -------------------- */
+  socket.on("power:useOnce", ({ code }) => {
+    const room = rooms.get(code);
+    if (!room) return;
+
+    const guard = actingGuard(room, socket);
+    if (guard) return socket.emit("error:msg", guard);
+
+    const stage = room.turnStageBy.get(socket.id) || "needDraw";
+    if (stage !== "hasDrawn") return socket.emit("error:msg", "You must have a drawn card to use power");
+
+    const drawn = room.drawnBy.get(socket.id);
+    if (!drawn) return socket.emit("error:msg", "No drawn card");
+
+    const r = drawn.rank;
+    if (!["7", "8", "9", "10", "J", "Q"].includes(r)) return socket.emit("error:msg", "This drawn card has no power");
+
+    if (r === "7" || r === "8") {
+      room.powerState.set(socket.id, { mode: "selfPeekPick", drawnRank: r });
+      broadcastRoom(room);
+      return;
+    }
+    if (r === "9" || r === "10") {
+      room.powerState.set(socket.id, { mode: "otherPeekPick", drawnRank: r });
+      broadcastRoom(room);
+      return;
+    }
+    if (r === "J") {
+      room.powerState.set(socket.id, { mode: "jPickMyCard", drawnRank: r, mySlotIndex: null });
+      broadcastRoom(room);
+      return;
+    }
+    if (r === "Q") {
+      room.powerState.set(socket.id, { mode: "qPickMyCard", drawnRank: r, mySlotIndex: null, target: null });
+      broadcastRoom(room);
+      return;
+    }
+  });
+
+  // 7/8: tap your own card to peek. After peek: drawn power card auto-discarded to USED and stage -> awaitEnd
+  socket.on("power:tapSelfCard", ({ code, slotIndex }) => {
+    const room = rooms.get(code);
+    if (!room) return;
+
+    const ps = room.powerState.get(socket.id) || { mode: "none" };
+    if (ps.mode !== "selfPeekPick") return socket.emit("error:msg", "Not in self peek mode");
+
+    const hand = room.hands.get(socket.id) || [];
+    const slot = hand[slotIndex];
+    if (!slot) return socket.emit("error:msg", "Empty slot");
+
+    socket.emit("power:result", { type: "peekSelf", card: slot.card });
+
+    // consume drawn power card to USED and keep turn (awaitEnd)
+    consumeDrawnToUsed(room, socket.id);
+    room.turnStageBy.set(socket.id, "awaitEnd");
+    room.powerState.set(socket.id, { mode: "none" });
+
+    broadcastRoom(room);
+  });
+
+  // 9/10: tap an opponent card to peek. After peek: consume drawn to USED, stage -> awaitEnd
+  socket.on("power:tapOtherCard", ({ code, otherPlayerId, otherSlotIndex }) => {
+    const room = rooms.get(code);
+    if (!room) return;
+
+    const ps = room.powerState.get(socket.id) || { mode: "none" };
+
+    if (ps.mode === "otherPeekPick") {
+      const otherHand = room.hands.get(otherPlayerId) || [];
+      const otherSlot = otherHand[otherSlotIndex];
+      if (!otherSlot) return socket.emit("error:msg", "Other slot empty");
+
+      socket.emit("power:result", { type: "peekOther", card: otherSlot.card });
+
+      consumeDrawnToUsed(room, socket.id);
+      room.turnStageBy.set(socket.id, "awaitEnd");
+      room.powerState.set(socket.id, { mode: "none" });
+
+      broadcastRoom(room);
+      return;
+    }
+
+    // J swap flow
+    if (ps.mode === "jPickOpponentCard") {
+      const mySlotIndex = ps.mySlotIndex;
+      if (mySlotIndex === null || mySlotIndex === undefined) return socket.emit("error:msg", "Select your card first");
+
+      const myHand = room.hands.get(socket.id) || [];
+      const otherHand = room.hands.get(otherPlayerId) || [];
+
+      const mySlot = myHand[mySlotIndex];
+      const otherSlot = otherHand[otherSlotIndex];
+      if (!mySlot) return socket.emit("error:msg", "Your slot empty");
+      if (!otherSlot) return socket.emit("error:msg", "Other slot empty");
+
+      const tmp = mySlot.card;
+      mySlot.card = otherSlot.card;
+      otherSlot.card = tmp;
+
+      consumeDrawnToUsed(room, socket.id);
+      room.turnStageBy.set(socket.id, "awaitEnd");
+      room.powerState.set(socket.id, { mode: "none" });
+
+      broadcastRoom(room);
+      return;
+    }
+
+    // Q swap flow: pick opponent card to peek and then decide
+    if (ps.mode === "qPickOpponentCard") {
+      const mySlotIndex = ps.mySlotIndex;
+      if (mySlotIndex === null || mySlotIndex === undefined) return socket.emit("error:msg", "Select your card first");
+
+      const otherHand = room.hands.get(otherPlayerId) || [];
+      const otherSlot = otherHand[otherSlotIndex];
+      if (!otherSlot) return socket.emit("error:msg", "Other slot empty");
+
+      socket.emit("power:result", { type: "qPeekThenDecide", card: otherSlot.card });
+
+      room.powerState.set(socket.id, {
+        ...ps,
+        mode: "qAwaitDecision",
+        target: { otherPlayerId, otherSlotIndex },
+      });
+
+      broadcastRoom(room);
+      return;
+    }
+
+    socket.emit("error:msg", "Not in a power mode that targets another card");
+  });
+
+  // J: pick your card first
+  socket.on("power:tapMyCardForSwap", ({ code, mySlotIndex }) => {
+    const room = rooms.get(code);
+    if (!room) return;
+
+    const ps = room.powerState.get(socket.id) || { mode: "none" };
+    if (ps.mode !== "jPickMyCard") return socket.emit("error:msg", "Not in J pick-my-card mode");
+
+    const hand = room.hands.get(socket.id) || [];
+    if (!hand[mySlotIndex]) return socket.emit("error:msg", "Empty slot");
+
+    room.powerState.set(socket.id, { ...ps, mode: "jPickOpponentCard", mySlotIndex });
+    broadcastRoom(room);
+  });
+
+  // Q: pick your card first
+  socket.on("power:tapMyCardForQ", ({ code, mySlotIndex }) => {
+    const room = rooms.get(code);
+    if (!room) return;
+
+    const ps = room.powerState.get(socket.id) || { mode: "none" };
+    if (ps.mode !== "qPickMyCard") return socket.emit("error:msg", "Not in Q pick-my-card mode");
+
+    const hand = room.hands.get(socket.id) || [];
+    if (!hand[mySlotIndex]) return socket.emit("error:msg", "Empty slot");
+
+    room.powerState.set(socket.id, { ...ps, mode: "qPickOpponentCard", mySlotIndex });
+    broadcastRoom(room);
+  });
+
+  // Q decision
+  socket.on("power:qDecision", ({ code, accept }) => {
+    const room = rooms.get(code);
+    if (!room) return;
+
+    const ps = room.powerState.get(socket.id) || { mode: "none" };
+    if (ps.mode !== "qAwaitDecision" || !ps.target) return socket.emit("error:msg", "No Q decision pending");
+
+    if (accept) {
+      const mySlotIndex = ps.mySlotIndex;
+      const { otherPlayerId, otherSlotIndex } = ps.target;
+
+      const myHand = room.hands.get(socket.id) || [];
+      const otherHand = room.hands.get(otherPlayerId) || [];
+
+      const mySlot = myHand[mySlotIndex];
+      const otherSlot = otherHand[otherSlotIndex];
+      if (!mySlot) return socket.emit("error:msg", "Your slot empty");
+      if (!otherSlot) return socket.emit("error:msg", "Other slot empty");
+
+      const tmp = mySlot.card;
+      mySlot.card = otherSlot.card;
+      otherSlot.card = tmp;
+    }
+
+    consumeDrawnToUsed(room, socket.id);
+    room.turnStageBy.set(socket.id, "awaitEnd");
+    room.powerState.set(socket.id, { mode: "none" });
+
+    broadcastRoom(room);
+  });
+
+  /* -------------------- Race claim (ANYONE can do it; not turn-gated) -------------------- */
+  socket.on("used:claim", ({ code, slotIndex }) => {
+    const room = rooms.get(code);
+    if (!room) return;
+    if (room.phase !== "playing") return;
+
+    tickUsedWindow(room);
+    const w = room.usedWindow;
+    if (!w) return socket.emit("error:msg", "No active thrown card");
+
+    // 0.2s penalty window after someone already won
+    if (w.state === "postWin") {
+      if (nowMs() <= w.postWinUntil) givePenaltyCard(room, socket.id);
+      broadcastRoom(room);
+      return;
+    }
+
+    const hand = room.hands.get(socket.id) || [];
+    const slot = hand[slotIndex];
+    if (!slot) return socket.emit("error:msg", "Empty slot");
+
+    // Wrong claim => penalty card
+    if (slot.card.rank !== w.card.rank) {
+      givePenaltyCard(room, socket.id);
+      broadcastRoom(room);
+      return;
+    }
+
+    // Correct claim: discard both to USED pile
+    room.usedPile.push(slot.card);
+    hand[slotIndex] = null;
+    room.usedPile.push(w.card);
+
+    // Start the 0.2 sec penalty window
+    room.usedWindow = { state: "postWin", postWinUntil: nowMs() + 200, card: w.card };
+
+    if (maybeEndIfOut(room, socket.id)) return broadcastRoom(room);
+    broadcastRoom(room);
+  });
+
+  socket.on("disconnect", () => {
+    for (const [code, room] of rooms.entries()) {
+      if (!room.players.has(socket.id)) continue;
+
+      room.players.delete(socket.id);
+      room.order = room.order.filter((id) => id !== socket.id);
+      room.hands.delete(socket.id);
+      room.drawnBy.delete(socket.id);
+      room.turnStageBy.delete(socket.id);
+      room.ready.delete(socket.id);
+      room.powerState.delete(socket.id);
+
+      if (room.order.length === 0) {
+        rooms.delete(code);
+        continue;
+      }
+      if (room.hostId === socket.id) room.hostId = room.order[0];
+      room.turnIndex = Math.min(room.turnIndex, room.order.length - 1);
+
+      broadcastRoom(room);
+    }
+  });
+});
+
+const PORT = process.env.PORT || 8080;
+server.listen(PORT, () => console.log(`KARGO server listening on :${PORT}`));
