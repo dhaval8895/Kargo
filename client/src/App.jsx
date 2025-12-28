@@ -342,13 +342,18 @@ function AppInner() {
   const canThrowPair =
     amIAllowedToAct && turnStage === "hasDrawn" && !!drawn && powerMode === "none" && pairPick.length === 2;
 
-  // 2x2 layout: top row slot 2/3, bottom row slot 0/1
-  const slotDisplayOrder = [2, 3, 0, 1];
-
   const usedTop2 = room?.usedTop2 ?? [];
   const usedCount = room?.usedCount ?? 0;
 
   const turnName = players.find((p) => p.id === room?.turnPlayerId)?.name ?? "?";
+
+  // first 4 shown as 2x2; extras as a row (face-down)
+  const mySlots = me?.slots ?? [];
+  const base4 = mySlots.slice(0, 4);
+  const extras = mySlots.slice(4);
+  const slotDisplayOrder = [2, 3, 0, 1]; // 2x2 order for first four
+
+  const lastRound = room?.lastRound ?? null;
 
   if (!SERVER_URL) {
     return (
@@ -371,8 +376,6 @@ function AppInner() {
 
   function onTapMySlot(slotIndex) {
     if (!room || !me) return;
-
-    // READY: no actions, just viewing
     if (room.phase !== "playing") return;
 
     // ✅ CLAIM is allowed for ANYONE (including thrower) UNTIL turn ends
@@ -397,6 +400,7 @@ function AppInner() {
 
     // normal play while hasDrawn
     if (amIAllowedToAct && turnStage === "hasDrawn" && powerMode === "none") {
+      // pair selection UX
       if (pairPick.length > 0) {
         togglePairPick(slotIndex);
         return;
@@ -426,6 +430,15 @@ function AppInner() {
           75% { transform: translateY(0px); opacity: 1; }
           100% { transform: translateY(-10px); opacity: 0; }
         }
+        @keyframes winnerPulse {
+          0% { transform: scale(0.98); opacity: 0.6; }
+          40% { transform: scale(1.02); opacity: 1; }
+          100% { transform: scale(1); opacity: 1; }
+        }
+        @keyframes shimmer {
+          0% { background-position: 0% 50%; }
+          100% { background-position: 100% 50%; }
+        }
       `}</style>
 
       {turnToast && (
@@ -438,7 +451,7 @@ function AppInner() {
         <div>
           <h1 style={{ margin: 0 }}>KARGO</h1>
           <div style={{ fontSize: 12, opacity: 0.6 }}>
-            Claim stays open until turn ends • Any player can claim • Wrong claim = +1 card
+            Power claim enabled • Wrong claim = +1 • Penalties add face-down slots
           </div>
           <div style={{ opacity: 0.75, fontSize: 13 }}>
             {connected ? "connected" : "disconnected"} • Server: {SERVER_URL}
@@ -490,6 +503,107 @@ function AppInner() {
         </div>
       ) : (
         <div style={cardWrap}>
+          {/* ✅ End-of-round reveal + scoreboards */}
+          {room.phase === "lobby" && lastRound && (
+            <div style={{ marginBottom: 16 }}>
+              <div
+                style={{
+                  padding: 14,
+                  borderRadius: 16,
+                  border: "1px solid rgba(17,24,39,0.12)",
+                  background:
+                    "linear-gradient(90deg, rgba(99,102,241,0.18), rgba(16,185,129,0.18), rgba(244,63,94,0.18))",
+                  backgroundSize: "220% 220%",
+                  animation: "shimmer 1400ms ease-in-out infinite alternate, winnerPulse 650ms ease-out",
+                }}
+              >
+                <div style={{ fontSize: 12, opacity: 0.75 }}>Winner</div>
+                <div style={{ fontSize: 28, fontWeight: 950 }}>{lastRound.winnerName}</div>
+                <div style={{ marginTop: 6, fontSize: 12, opacity: 0.8 }}>
+                  Round complete — all cards revealed below.
+                </div>
+              </div>
+
+              {/* Round scoreboard */}
+              {room.roundBoard?.deltas?.length ? (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ fontSize: 12, opacity: 0.7 }}>Round scoreboard</div>
+                  <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+                    {room.roundBoard.deltas.map((d) => (
+                      <div
+                        key={d.name}
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          padding: 10,
+                          border: "1px solid #e5e7eb",
+                          borderRadius: 14,
+                        }}
+                      >
+                        <div style={{ fontWeight: 900 }}>{d.name}</div>
+                        <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
+                          <div style={{ fontWeight: 900, color: d.delta < 0 ? "#166534" : "#991b1b" }}>
+                            {d.delta >= 0 ? `+${d.delta}` : d.delta}
+                          </div>
+                          <div style={{ opacity: 0.7 }}>Total: {d.totalAfter}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Total scoreboard */}
+              {room.scoreboard?.length ? (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ fontSize: 12, opacity: 0.7 }}>Total scoreboard</div>
+                  <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+                    {[...room.scoreboard]
+                      .sort((a, b) => a.score - b.score)
+                      .map((s) => (
+                        <div
+                          key={s.name}
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            padding: 10,
+                            border: "1px solid #e5e7eb",
+                            borderRadius: 14,
+                          }}
+                        >
+                          <div style={{ fontWeight: 900 }}>{s.name}</div>
+                          <div style={{ fontWeight: 900 }}>{s.score}</div>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Reveal hands */}
+              {lastRound.reveal && (
+                <div style={{ marginTop: 14 }}>
+                  <div style={{ fontSize: 12, opacity: 0.7 }}>Revealed hands</div>
+                  <div style={{ display: "grid", gap: 12, marginTop: 10 }}>
+                    {Object.entries(lastRound.reveal).map(([pname, cards]) => (
+                      <div key={pname} style={{ padding: 12, borderRadius: 16, border: "1px solid #e5e7eb" }}>
+                        <div style={{ fontWeight: 900, marginBottom: 10 }}>{pname}</div>
+                        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                          {(cards || []).map((c, idx) =>
+                            c ? (
+                              <PlayingCard key={idx} slot={{ faceUp: true, card: c }} disabled={true} />
+                            ) : (
+                              <PlayingCard key={idx} slot={null} disabled={true} />
+                            )
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
             <div>
               <div style={{ fontSize: 12, opacity: 0.7 }}>Room code</div>
@@ -518,11 +632,7 @@ function AppInner() {
 
             {room.phase === "ready" && (
               <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                <button
-                  style={btn}
-                  disabled={room.readyState?.mine}
-                  onClick={() => socket.emit("game:ready", { code: room.code })}
-                >
+                <button style={btn} disabled={room.readyState?.mine} onClick={() => socket.emit("game:ready", { code: room.code })}>
                   {room.readyState?.mine ? "Ready ✓" : "Ready"}
                 </button>
                 <div style={{ fontSize: 13, opacity: 0.8 }}>
@@ -568,7 +678,7 @@ function AppInner() {
             </div>
           </div>
 
-          {/* ✅ TABLE FIRST (Deck / Drawn / Used) */}
+          {/* TABLE FIRST */}
           {room.phase === "playing" && (
             <>
               <div style={{ marginTop: 16, display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
@@ -591,12 +701,12 @@ function AppInner() {
                   <div style={{ fontSize: 11, opacity: 0.65 }}>Tap drawn to discard</div>
                 </div>
 
-                <div style={{ display: "grid", gap: 6, position: "relative" }}>
+                <div style={{ display: "grid", gap: 6 }}>
                   <div style={{ fontSize: 12, opacity: 0.7 }}>Used pile</div>
                   <UsedPileMini top2={usedTop2} count={usedCount} claimRank={claimRank} claimState={claimState} />
                 </div>
 
-                {/* ✅ Peek modal next to table (not bottom) */}
+                {/* Peek modal */}
                 {peekModal && (
                   <div
                     style={{
@@ -687,14 +797,12 @@ function AppInner() {
                   End Turn
                 </button>
 
-                <div style={{ fontSize: 12, opacity: 0.75 }}>
-                  {amIAllowedToAct ? "Your turn" : `Waiting for ${turnName}…`}
-                </div>
+                <div style={{ fontSize: 12, opacity: 0.75 }}>{amIAllowedToAct ? "Your turn" : `Waiting for ${turnName}…`}</div>
               </div>
             </>
           )}
 
-          {/* ✅ Your hand BELOW the table */}
+          {/* Your hand BELOW table */}
           {(room.phase === "ready" || room.phase === "playing") && (
             <div style={{ marginTop: 18 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
@@ -703,10 +811,12 @@ function AppInner() {
                 </div>
               </div>
 
+              {/* First 4 cards in 2x2 */}
               <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "repeat(2, max-content)", gap: 12 }}>
                 {slotDisplayOrder.map((idx) => {
-                  const slot = me?.slots?.[idx] ?? null;
+                  const slot = base4[idx] ?? null;
                   const selected = pairPick.includes(idx);
+                  const realIndex = idx; // actual slot index in hand
                   return (
                     <PlayingCard
                       key={idx}
@@ -714,21 +824,46 @@ function AppInner() {
                       labelText={`slot ${idx}`}
                       disabled={room.phase !== "playing" || !slot}
                       highlight={selected}
-                      onClick={() => onTapMySlot(idx)}
+                      onClick={() => {
+                        if (amIAllowedToAct && turnStage === "hasDrawn" && powerMode === "none" && pairPick.length === 0) {
+                          // allow pair selection by starting with shift-like behavior: click "Clear Pair" then pick two,
+                          // OR start picking by clicking Clear Pair? keep existing: tap empty does nothing.
+                        }
+                        onTapMySlot(realIndex);
+                      }}
                     />
                   );
                 })}
               </div>
 
+              {/* Extra penalty cards as a row (face-down) */}
+              {extras.length > 0 && (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ fontSize: 12, opacity: 0.65, marginBottom: 8 }}>Penalty cards</div>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                    {extras.map((s, i) => (
+                      <PlayingCard
+                        key={i}
+                        slot={null}
+                        forceBack={true}
+                        disabled={false}
+                        labelText={`slot ${i + 4}`}
+                        onClick={() => onTapMySlot(i + 4)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {room.phase === "playing" && claimRank && (
                 <div style={{ marginTop: 10, padding: 10, borderRadius: 12, border: "1px solid #fecaca", background: "#fff1f2", color: "#991b1b", fontWeight: 800 }}>
-                  Claim is LIVE (rank {claimRank}) — tap your matching card to discard it. Wrong tap = +1 card. Second tap within 0.2s after winner = +1 card.
+                  Claim is LIVE (rank {claimRank}) — anyone can tap a matching card to discard it. Wrong tap = +1 card. Second tap within 0.2s after winner = +1 card.
                 </div>
               )}
             </div>
           )}
 
-          {/* Opponents (only during power) */}
+          {/* Opponents (only during power targeting) */}
           {room.phase === "playing" && (
             <div style={{ marginTop: 18, display: "grid", gap: 14 }}>
               <div style={{ fontSize: 12, opacity: 0.7 }}>Opponents (tap only during power)</div>
