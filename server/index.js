@@ -261,8 +261,8 @@ function buildFinalTurns(room, callerId) {
 }
 
 function nextTurn(room) {
-  // ✅ claim stays open until active player ends turn => clear only when turn advances
-  room.claim = null;
+  // ✅ IMPORTANT: do NOT clear claim here anymore.
+  // Claim stays open through end-turn and only clears when the next player draws.
 
   const prevPid = room.order[room.turnIndex];
   if (prevPid) room.turnStageBy.set(prevPid, "needDraw");
@@ -288,7 +288,7 @@ function givePenaltyCard(room, pid) {
   const c = room.deck.pop();
   if (!c) return;
   const hand = room.hands.get(pid) || [];
-  hand.push({ card: c }); // ✅ adds new face-down slot for that player
+  hand.push({ card: c }); // face-down in client
   room.hands.set(pid, hand);
 }
 
@@ -410,13 +410,11 @@ function publicRoomView(room, viewerId) {
       const slots = hand.map((slot, idx) => {
         if (!slot) return null;
 
-        // READY: viewer sees their bottom 2 (slot 0/1) until they click Ready
         if (room.phase === "ready" && pid === viewerId && !viewerReady) {
           if (idx === 0 || idx === 1) return { faceUp: true, card: slot.card };
           return { faceUp: false, card: null };
         }
 
-        // PLAYING: always hidden
         return { faceUp: false, card: null };
       });
 
@@ -541,6 +539,9 @@ io.on("connection", (socket) => {
     const stage = room.turnStageBy.get(socket.id) || "needDraw";
     if (stage !== "needDraw") return socket.emit("error:msg", "You cannot draw right now");
 
+    // ✅ claim closes only when the next player draws
+    room.claim = null;
+
     ensureDeck(room);
     const drawn = room.deck.pop();
     if (!drawn) return socket.emit("error:msg", "Deck empty");
@@ -553,7 +554,6 @@ io.on("connection", (socket) => {
     broadcastRoom(room);
   });
 
-  // Tap slot to resolve draw:
   socket.on("turn:resolveDrawTap", ({ code, slotIndex }) => {
     const room = rooms.get(code);
     if (!room) return;
@@ -709,7 +709,6 @@ io.on("connection", (socket) => {
     const guard = actingGuard(room, socket);
     if (guard) return socket.emit("error:msg", guard);
 
-    // If they still had a drawn card, discard it (no claim here)
     consumeDrawnToUsed(room, socket.id, { makeClaim: false });
 
     const callerName = room.players.get(socket.id)?.name ?? "Caller";
@@ -725,7 +724,7 @@ io.on("connection", (socket) => {
     broadcastRoom(room);
   });
 
-  /* -------------------- Power (single use; power card itself becomes claimable) -------------------- */
+  /* -------------------- Power (single use; power card becomes claimable until next draw) -------------------- */
   socket.on("power:useOnce", ({ code }) => {
     const room = rooms.get(code);
     if (!room) return;
@@ -784,11 +783,11 @@ io.on("connection", (socket) => {
 
     const hand = room.hands.get(socket.id) || [];
     const slot = hand[slotIndex];
-    if (!slot) return socket.emit("error:msg", "Empty slot");
+    if (!slot || !slot.card) return socket.emit("error:msg", "Empty slot");
 
     socket.emit("power:result", { type: "peekSelf", card: slot.card });
 
-    // ✅ power used: move drawn power card to used AND open claim for that rank
+    // power used => move drawn power card to used, open claim
     consumeDrawnToUsed(room, socket.id, { makeClaim: true });
 
     room.turnStageBy.set(socket.id, "awaitEnd");
@@ -804,12 +803,11 @@ io.on("connection", (socket) => {
 
     const otherHand = room.hands.get(otherPlayerId) || [];
     const otherSlot = otherHand[otherSlotIndex];
-    if (!otherSlot) return socket.emit("error:msg", "Other slot empty");
+    if (!otherSlot || !otherSlot.card) return socket.emit("error:msg", "Other slot empty");
 
     if (ps.mode === "otherPeekPick") {
       socket.emit("power:result", { type: "peekOther", card: otherSlot.card });
 
-      // ✅ power used: move drawn power card to used AND open claim
       consumeDrawnToUsed(room, socket.id, { makeClaim: true });
 
       room.turnStageBy.set(socket.id, "awaitEnd");
@@ -831,8 +829,15 @@ io.on("connection", (socket) => {
       return;
     }
 
-    socket.emit("error:msg", "Not in a power mode that targets another card");
+    socket.emit("error:msg", "Not targeting another player right now");
   });
+
+  function emitSwapNotice(room, aId, aSlot, aNewCard, bId, bSlot, bNewCard, kind) {
+    const aName = room.players.get(aId)?.name ?? "Player";
+    const bName = room.players.get(bId)?.name ?? "Player";
+    io.to(aId).emit("swap:notice", { kind, withPlayer: bName, mySlot: aSlot, newCard: aNewCard });
+    io.to(bId).emit("swap:notice", { kind, withPlayer: aName, mySlot: bSlot, newCard: bNewCard });
+  }
 
   socket.on("power:tapMyCardForJSwap", ({ code, mySlotIndex }) => {
     const room = rooms.get(code);
@@ -843,18 +848,22 @@ io.on("connection", (socket) => {
 
     const myHand = room.hands.get(socket.id) || [];
     const mySlot = myHand[mySlotIndex];
-    if (!mySlot) return socket.emit("error:msg", "Your slot empty");
+    if (!mySlot || !mySlot.card) return socket.emit("error:msg", "Your slot empty");
 
     const { otherPlayerId, otherSlotIndex } = ps.target;
     const otherHand = room.hands.get(otherPlayerId) || [];
     const otherSlot = otherHand[otherSlotIndex];
-    if (!otherSlot) return socket.emit("error:msg", "Other slot empty");
+    if (!otherSlot || !otherSlot.card) return socket.emit("error:msg", "Other slot empty");
 
-    const tmp = mySlot.card;
-    mySlot.card = otherSlot.card;
-    otherSlot.card = tmp;
+    const aOld = mySlot.card;
+    const bOld = otherSlot.card;
 
-    // ✅ power used: move drawn J to used AND open claim rank=J
+    mySlot.card = bOld;
+    otherSlot.card = aOld;
+
+    // notify both players which of THEIR slot changed, and what card replaced it
+    emitSwapNotice(room, socket.id, mySlotIndex, mySlot.card, otherPlayerId, otherSlotIndex, otherSlot.card, "J");
+
     consumeDrawnToUsed(room, socket.id, { makeClaim: true });
 
     room.turnStageBy.set(socket.id, "awaitEnd");
@@ -870,7 +879,6 @@ io.on("connection", (socket) => {
     if (ps.mode !== "qAwaitDecision" || !ps.target) return socket.emit("error:msg", "No Q decision pending");
 
     if (!accept) {
-      // ✅ Q used even if decline swap: move drawn Q to used AND open claim rank=Q
       consumeDrawnToUsed(room, socket.id, { makeClaim: true });
 
       room.turnStageBy.set(socket.id, "awaitEnd");
@@ -892,18 +900,21 @@ io.on("connection", (socket) => {
 
     const myHand = room.hands.get(socket.id) || [];
     const mySlot = myHand[mySlotIndex];
-    if (!mySlot) return socket.emit("error:msg", "Your slot empty");
+    if (!mySlot || !mySlot.card) return socket.emit("error:msg", "Your slot empty");
 
     const { otherPlayerId, otherSlotIndex } = ps.target;
     const otherHand = room.hands.get(otherPlayerId) || [];
     const otherSlot = otherHand[otherSlotIndex];
-    if (!otherSlot) return socket.emit("error:msg", "Other slot empty");
+    if (!otherSlot || !otherSlot.card) return socket.emit("error:msg", "Other slot empty");
 
-    const tmp = mySlot.card;
-    mySlot.card = otherSlot.card;
-    otherSlot.card = tmp;
+    const aOld = mySlot.card;
+    const bOld = otherSlot.card;
 
-    // ✅ power used: move drawn Q to used AND open claim rank=Q
+    mySlot.card = bOld;
+    otherSlot.card = aOld;
+
+    emitSwapNotice(room, socket.id, mySlotIndex, mySlot.card, otherPlayerId, otherSlotIndex, otherSlot.card, "Q");
+
     consumeDrawnToUsed(room, socket.id, { makeClaim: true });
 
     room.turnStageBy.set(socket.id, "awaitEnd");
