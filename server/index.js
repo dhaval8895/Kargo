@@ -330,12 +330,14 @@ io.on("connection", (socket) => {
     const tNow = nowMs();
     const matches = slot.card.rank === thrown.card.rank; // rank only
 
-    if (!matches) {
-      // wrong claim => penalty
-      givePenaltyCard(room, socket.id);
-      broadcastRoom(room);
-      return;
-    }
+   if (!matches) {
+    // Wrong claim:
+    // 1) player gets 1 penalty card from the unused deck
+    // 2) thrown card stays face-up and still claimable
+    givePenaltyCard(room, socket.id);
+    broadcastRoom(room);
+    return;
+  }
 
     // First correct winner
     if (!thrown.winner) {
