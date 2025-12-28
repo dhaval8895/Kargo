@@ -4,7 +4,7 @@ import { io } from "socket.io-client";
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL;
 
-/* ---------------- Error Boundary (prevents blank screen) ---------------- */
+/* ---------------- Error Boundary ---------------- */
 class ErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
@@ -21,12 +21,9 @@ class ErrorBoundary extends React.Component {
       return (
         <div style={page}>
           <div style={cardWrap}>
-            <h2 style={{ marginTop: 0 }}>UI crashed (but we caught it)</h2>
+            <h2 style={{ marginTop: 0 }}>UI crashed (caught)</h2>
             <div style={{ marginTop: 8, fontSize: 13, opacity: 0.85 }}>
               <b>Error:</b> {String(this.state.err?.message || this.state.err || "Unknown")}
-            </div>
-            <div style={{ marginTop: 12, fontSize: 12, opacity: 0.75 }}>
-              Fix: redeploy after updating code. If this keeps happening, copy the error above and send it to me.
             </div>
             <button style={{ ...btn, marginTop: 14 }} onClick={() => window.location.reload()}>
               Reload
@@ -39,7 +36,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 
-/* ---------- Card UI helpers ---------- */
+/* ---------- Card helpers ---------- */
 function suitSymbol(suit) {
   if (suit === "S") return "♠";
   if (suit === "H") return "♥";
@@ -50,7 +47,6 @@ function suitSymbol(suit) {
 function isRedSuit(suit) {
   return suit === "H" || suit === "D";
 }
-
 function corner(small) {
   return {
     position: "absolute",
@@ -186,7 +182,7 @@ function PlayingCard({ slot, onClick, disabled, small = false, labelText }) {
   );
 }
 
-/* ---------- Used pile stack (flat) ---------- */
+/* ---------- Used pile stack ---------- */
 function UsedPileStack({ topCard, count }) {
   const base = {
     width: 86,
@@ -214,7 +210,6 @@ function UsedPileStack({ topCard, count }) {
   );
 }
 
-/* ---------------- App Wrapper ---------------- */
 export default function App() {
   return (
     <ErrorBoundary>
@@ -223,7 +218,6 @@ export default function App() {
   );
 }
 
-/* ---------------- Main App ---------------- */
 function AppInner() {
   const socket = useMemo(() => {
     if (!SERVER_URL) return null;
@@ -241,6 +235,9 @@ function AppInner() {
   const [powerPeek, setPowerPeek] = useState(null);
   const [winnerSplash, setWinnerSplash] = useState(null);
 
+  // NEW: local “I already hit ready so hide my peek cards now”
+  const [readyLocalHide, setReadyLocalHide] = useState(false);
+
   useEffect(() => {
     if (!socket) return;
 
@@ -251,6 +248,15 @@ function AppInner() {
     const onUpdate = (r) => {
       setRoom(r);
       setError("");
+
+      // reset local hide when new round starts
+      if (r?.phase === "ready") {
+        // if you are not ready yet, show peek
+        const mineReady = !!r?.readyState?.mine;
+        setReadyLocalHide(mineReady);
+      } else {
+        setReadyLocalHide(false);
+      }
 
       if (r?.phase !== "playing") setDrawn(null);
 
@@ -267,11 +273,8 @@ function AppInner() {
 
     const onPower = (payload) => {
       if (!payload?.card) return;
-      if (payload.type === "peekSelf") {
-        setPowerPeek({ title: `Peek: your slot ${payload.slotIndex}`, card: payload.card });
-      } else if (payload.type === "peekOther") {
-        setPowerPeek({ title: `Peek: opponent slot ${payload.slotIndex}`, card: payload.card });
-      }
+      if (payload.type === "peekSelf") setPowerPeek({ title: `Peek: your card`, card: payload.card });
+      if (payload.type === "peekOther") setPowerPeek({ title: `Peek: opponent card`, card: payload.card });
     };
 
     socket.on("connect", onConnect);
@@ -299,14 +302,12 @@ function AppInner() {
   const stats = room?.stats || [];
 
   const me = players.find((p) => p.id === myId) || null;
-
   const isHost = room?.hostId === myId;
   const isMyTurn = room?.turnPlayerId === myId;
 
   const kargoActive = !!room?.kargo;
   const activeFinalPlayerId = room?.kargo?.activeFinalPlayerId ?? null;
   const amIActiveFinal = kargoActive ? activeFinalPlayerId === myId : false;
-
   const amIAllowedToAct = room?.phase === "playing" && (kargoActive ? amIActiveFinal : isMyTurn);
 
   const swapOffer = room?.swapOffer ?? null;
@@ -316,14 +317,22 @@ function AppInner() {
   const powerMode = room?.powerState?.mode ?? "none";
 
   const drawnRank = drawn?.rank ?? null;
-  const canPower = !!drawnRank && ["7", "8", "9", "10", "J", "Q"].includes(drawnRank);
+  const powerRank = drawnRank;
+  const canPower = !!powerRank && ["7", "8", "9", "10", "J", "Q"].includes(powerRank);
+
+  // READY: show ONLY bottom 2 cards, ONLY once
+  const readyPeekSlots = useMemo(() => {
+    if (!me?.slots) return [];
+    // bottom two slots are indices 0 and 1 in server deal
+    return [me.slots?.[0] || null, me.slots?.[1] || null, me.slots?.[2] || null, me.slots?.[3] || null];
+  }, [me]);
 
   if (!SERVER_URL) {
     return (
       <div style={page}>
         <div style={cardWrap}>
           <h2 style={{ marginTop: 0 }}>Missing VITE_SERVER_URL</h2>
-          <div>Set it in Vercel to your Render URL (https://…onrender.com).</div>
+          <div>Set it in Vercel to your Render URL.</div>
         </div>
       </div>
     );
@@ -346,7 +355,7 @@ function AppInner() {
       <div style={header}>
         <div>
           <h1 style={{ margin: 0 }}>KARGO</h1>
-          <div style={{ fontSize: 12, opacity: 0.6 }}>Tap-to-resolve • Ready gate • J/Q offer swaps</div>
+          <div style={{ fontSize: 12, opacity: 0.6 }}>Ready peek once • Powers consume drawn card • Cleaner UI</div>
           <div style={{ opacity: 0.75, fontSize: 13 }}>
             {connected ? "connected" : "disconnected"} • Server: {SERVER_URL}
           </div>
@@ -376,20 +385,11 @@ function AppInner() {
           </div>
 
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
-            <button
-              style={btn}
-              disabled={!name.trim() || !connected}
-              onClick={() => socket.emit("room:create", { name: name.trim() })}
-            >
+            <button style={btn} disabled={!name.trim() || !connected} onClick={() => socket.emit("room:create", { name: name.trim() })}>
               Create room
             </button>
 
-            <input
-              style={{ ...input, width: 160 }}
-              value={code}
-              onChange={(e) => setCode(e.target.value.toUpperCase())}
-              placeholder="ROOM CODE"
-            />
+            <input style={{ ...input, width: 160 }} value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} placeholder="ROOM CODE" />
 
             <button
               style={btn}
@@ -404,7 +404,6 @@ function AppInner() {
         </div>
       ) : (
         <>
-          {/* Winner Splash */}
           {winnerSplash && (
             <div style={winnerOverlay}>
               <div style={winnerCard}>
@@ -420,18 +419,8 @@ function AppInner() {
                 <div style={{ opacity: 0.75, fontSize: 13 }}>Room code</div>
                 <div style={{ fontSize: 26, fontWeight: 900, letterSpacing: 2 }}>{room.code}</div>
                 <div style={{ opacity: 0.75, fontSize: 13, marginTop: 6 }}>
-                  Phase: <b>{room.phase}</b> • Turn:{" "}
-                  <b>{players.find((p) => p.id === room.turnPlayerId)?.name ?? "—"}</b>
+                  Phase: <b>{room.phase}</b> • Turn: <b>{players.find((p) => p.id === room.turnPlayerId)?.name ?? "—"}</b>
                 </div>
-
-                {room.kargo && (
-                  <div style={{ marginTop: 10, padding: 10, borderRadius: 12, border: "1px solid #fde68a", background: "#fffbeb" }}>
-                    <div style={{ fontWeight: 900 }}>KARGO called by {room.kargo.callerName}</div>
-                    <div style={{ fontSize: 12, opacity: 0.75 }}>
-                      Final player: <b>{players.find((p) => p.id === room.kargo.activeFinalPlayerId)?.name ?? "—"}</b>
-                    </div>
-                  </div>
-                )}
               </div>
 
               <div style={{ minWidth: 260 }}>
@@ -467,7 +456,6 @@ function AppInner() {
               </div>
             </div>
 
-            {/* Lobby actions */}
             {room.phase === "lobby" && (
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 14 }}>
                 <button style={btn} disabled={!isHost || players.length < 2} onClick={() => socket.emit("game:start", { code: room.code })}>
@@ -477,16 +465,39 @@ function AppInner() {
               </div>
             )}
 
-            {/* READY phase */}
+            {/* READY PHASE: show bottom two cards once */}
             {inReadyPhase && (
               <div style={{ marginTop: 12, padding: 12, borderRadius: 12, border: "1px solid #e5e7eb", background: "#f8fafc" }}>
                 <div style={{ fontWeight: 900 }}>Ready check</div>
                 <div style={{ fontSize: 13, opacity: 0.75, marginTop: 6 }}>
-                  Peek your two bottom cards now. When everyone hits Ready, all cards flip facedown and play begins.
+                  This is your only chance to see your bottom two cards. When you hit Ready, they hide again.
                 </div>
 
-                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
-                  <button style={btn} disabled={readyMine} onClick={() => socket.emit("game:ready", { code: room.code })}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(2, max-content)", gap: 12, marginTop: 12 }}>
+                  {readyPeekSlots.slice(0, 4).map((slot, idx) => {
+                    const isBottomTwo = idx === 0 || idx === 1;
+                    const forceFaceUp = isBottomTwo && !readyLocalHide;
+                    const effectiveSlot =
+                      slot && forceFaceUp
+                        ? { ...slot, faceUp: true }
+                        : slot
+                        ? { ...slot, faceUp: false } // hide everything else during ready
+                        : null;
+
+                    return <PlayingCard key={idx} slot={effectiveSlot} disabled={true} labelText={`slot ${idx}`} />;
+                  })}
+                </div>
+
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 12 }}>
+                  <button
+                    style={btn}
+                    disabled={readyMine}
+                    onClick={() => {
+                      // locally hide immediately after clicking
+                      setReadyLocalHide(true);
+                      socket.emit("game:ready", { code: room.code });
+                    }}
+                  >
                     {readyMine ? "Ready ✅" : "Ready"}
                   </button>
                 </div>
@@ -509,10 +520,7 @@ function AppInner() {
             <div style={cardWrap}>
               <h3 style={{ marginTop: 0 }}>Swap Offer</h3>
               <div style={{ opacity: 0.8, marginBottom: 10 }}>
-                <b>{swapOffer.fromName}</b> wants your card in slot <b>{swapOffer.toSlotIndex}</b>.
-                <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
-                  Tap which of <b>{swapOffer.fromName}</b>’s cards you want in exchange.
-                </div>
+                <b>{swapOffer.fromName}</b> wants your card in slot <b>{swapOffer.toSlotIndex}</b>. Tap which of their cards you want in exchange.
               </div>
 
               <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
@@ -539,19 +547,16 @@ function AppInner() {
                   <div style={{ opacity: 0.75, fontSize: 13, marginBottom: 6 }}>Active used card (race claim)</div>
                   <PlayingCard slot={room.thrownCard ? { faceUp: true, card: room.thrownCard } : null} disabled={true} />
                   <div style={{ maxWidth: 280, fontSize: 12, opacity: 0.75, lineHeight: 1.35, marginTop: 8 }}>
-                    Penalties happen only here: wrong rank match = +1 unseen penalty card.
+                    Wrong claim = +1 unseen penalty card.
                   </div>
                 </div>
 
                 <div style={{ flex: 1, minWidth: 260 }}>
                   <div style={{ opacity: 0.75, fontSize: 13, marginBottom: 6 }}>Used pile</div>
                   <UsedPileStack topCard={room.usedPileTop} count={room.usedPileCount || 0} />
-                  <div style={{ fontSize: 12, opacity: 0.6, marginTop: 6 }}>
-                    When the draw deck ends, used pile reshuffles automatically.
-                  </div>
                 </div>
 
-                <div style={{ flex: 1, minWidth: 380 }}>
+                <div style={{ flex: 1, minWidth: 420 }}>
                   <div style={{ opacity: 0.75, fontSize: 13, marginBottom: 6 }}>
                     Actions {kargoActive ? "(final turns)" : ""}
                   </div>
@@ -561,49 +566,33 @@ function AppInner() {
                       Draw
                     </button>
 
+                    <button style={btnGhost} disabled={!amIAllowedToAct || !!drawn || kargoActive || !!swapOffer} onClick={() => socket.emit("kargo:call", { code: room.code })}>
+                      Call KARGO
+                    </button>
+
                     <button
                       style={btnGhost}
-                      disabled={!amIAllowedToAct || !!drawn || kargoActive || !!swapOffer}
-                      onClick={() => socket.emit("kargo:call", { code: room.code })}
+                      disabled={!amIAllowedToAct || !drawn || !canPower || !!swapOffer}
+                      onClick={() => socket.emit("power:useOnce", { code: room.code })}
+                      title="Uses power ONCE, consumes drawn card, ends turn"
                     >
-                      Call KARGO
+                      Use Power
                     </button>
                   </div>
 
                   <div style={{ marginTop: 14, padding: 12, borderRadius: 12, border: "1px solid #e5e7eb" }}>
                     <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
                       <div style={{ fontWeight: 900 }}>Drawn:</div>
-
-                      <PlayingCard
-                        slot={drawn ? { faceUp: true, card: drawn } : null}
-                        disabled={!drawn || !canPower}
-                        onClick={() => {
-                          if (!drawn) return;
-                          if (!canPower) return;
-
-                          if (drawn.rank === "Q" && powerMode === "qConfirmOffer") {
-                            socket.emit("power:qConfirm", { code: room.code });
-                            return;
-                          }
-                          socket.emit("power:activate", { code: room.code });
-                        }}
-                        labelText={drawn && canPower ? "tap for power" : ""}
-                      />
-
+                      <PlayingCard slot={drawn ? { faceUp: true, card: drawn } : null} disabled={true} />
                       <div style={{ fontSize: 12, opacity: 0.7, maxWidth: 360 }}>
-                        After drawing: <b>tap one of your cards</b>.
+                        Tap one of your cards to resolve:
                         <ul style={{ margin: "6px 0 0 18px" }}>
                           <li>Match rank → discard both</li>
                           <li>No match → swap (no penalty)</li>
                         </ul>
+                        Power cards are single-use via the <b>Use Power</b> button.
                       </div>
                     </div>
-
-                    {drawn?.rank === "Q" && powerMode === "qConfirmOffer" && (
-                      <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
-                        Q: You peeked a card. Tap the drawn Q again to send the offer.
-                      </div>
-                    )}
 
                     {powerMode !== "none" && (
                       <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
@@ -614,37 +603,29 @@ function AppInner() {
                 </div>
               </div>
 
-              {/* Your hand */}
+              {/* Your hand in 2x2 grid */}
               <div style={{ marginTop: 16 }}>
                 <h3 style={{ marginTop: 0 }}>Your hand</h3>
 
-                <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(2, max-content)", gap: 12 }}>
                   {(me?.slots || []).map((slot, i) => (
-                    <div key={i} style={{ textAlign: "center" }}>
-                      <PlayingCard
-                        slot={slot}
-                        labelText={`slot ${i}`}
-                        disabled={(!room.thrownCard && !drawn && powerMode !== "selfPeekPick")}
-                        onClick={() => {
-                          if (powerMode === "selfPeekPick") {
-                            socket.emit("power:tapSelfCard", { code: room.code, slotIndex: i });
-                            return;
-                          }
-
-                          if (drawn && amIAllowedToAct) {
-                            socket.emit("turn:resolveDrawTap", { code: room.code, slotIndex: i });
-                            setDrawn(null);
-                            return;
-                          }
-
-                          if (room.thrownCard) {
-                            socket.emit("used:claim", { code: room.code, slotIndex: i });
-                            return;
-                          }
-                        }}
-                      />
-                      <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>{slot ? "" : "empty"}</div>
-                    </div>
+                    <PlayingCard
+                      key={i}
+                      slot={slot}
+                      labelText={`slot ${i}`}
+                      disabled={(!room.thrownCard && !drawn && powerMode !== "selfPeekPick")}
+                      onClick={() => {
+                        if (drawn && amIAllowedToAct) {
+                          socket.emit("turn:resolveDrawTap", { code: room.code, slotIndex: i });
+                          setDrawn(null);
+                          return;
+                        }
+                        if (room.thrownCard) {
+                          socket.emit("used:claim", { code: room.code, slotIndex: i });
+                          return;
+                        }
+                      }}
+                    />
                   ))}
                 </div>
               </div>
@@ -681,7 +662,7 @@ function AppInner() {
                         </div>
 
                         <div style={{ marginTop: 8, fontSize: 12, opacity: 0.6 }}>
-                          For 9/10/J/Q: tap drawn card → then tap an opponent card.
+                          For 7/8 peek self and 9/10 peek other: click <b>Use Power</b> then tap a target card.
                         </div>
                       </div>
                     ))}
