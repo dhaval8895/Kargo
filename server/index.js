@@ -23,14 +23,12 @@ function shuffle(arr) {
   }
   return a;
 }
-
 function makeDecks(deckCount) {
   const cards = [];
   for (let d = 0; d < deckCount; d++) {
     for (const s of SUITS) for (const r of RANKS) {
       cards.push({ id: `${d}-${r}-${s}-${Math.random()}`, rank: r, suit: s });
     }
-    // 2 jokers per deck
     cards.push({ id: `${d}-JOKER-0-${Math.random()}`, rank: "JOKER", suit: "J" });
     cards.push({ id: `${d}-JOKER-1-${Math.random()}`, rank: "JOKER", suit: "J" });
   }
@@ -77,27 +75,6 @@ function makeRoomCode() {
   return code;
 }
 
-/* -------------------- Claim window (on top of used pile) -------------------- */
-// When a card becomes claimable (player swapped out / "threw" it), it is placed into used pile
-// and becomes claimable for 2 seconds. If claimed successfully, the claimer discards matching card.
-// If someone clicks wrong, they get penalty.
-// If someone clicks within 0.2s after winner, they get penalty.
-function tickClaim(room) {
-  const c = room.claim;
-  if (!c) return;
-
-  const t = nowMs();
-  if (c.state === "open") {
-    if (t - c.openedAt > 2000) {
-      room.claim = null;
-    }
-    return;
-  }
-  if (c.state === "postWin") {
-    if (t > c.postWinUntil) room.claim = null;
-  }
-}
-
 /* -------------------- Round end / scoring -------------------- */
 function snapshotHands(room) {
   const snap = {};
@@ -118,15 +95,17 @@ function resetToLobby(room) {
   room.deck = [];
   room.usedPile = [];
   room.claim = null;
+
   room.hands = new Map();
   room.turnIndex = 0;
   room.drawnBy = new Map();
   room.turnStageBy = new Map();
+
   room.ready = new Map();
   room.readyGateOpen = false;
+
   room.kargo = null;
   room.powerState = new Map();
-  // keep lastRound + roundBoard so UI can reveal
 }
 
 function endRoundAndScoreStandard(room, winnerPid, reason = "out") {
@@ -212,11 +191,7 @@ function endRoundAndScoreKargoCompare(room) {
 
   for (const t of totals) {
     const prev = room.scoreboard.get(t.name) ?? 0;
-    let delta = 0;
-
-    if (t.pid === callerId) delta = -20;
-    else delta = t.total;
-
+    const delta = t.pid === callerId ? -20 : t.total;
     room.scoreboard.set(t.name, prev + delta);
     deltas.push({ name: t.name, delta, totalAfter: prev + delta });
   }
@@ -269,6 +244,10 @@ function buildFinalTurns(room, callerId) {
 }
 
 function nextTurn(room) {
+  // IMPORTANT: claim stays open until the active player ends their turn,
+  // so clear it only when moving to the next player.
+  room.claim = null;
+
   const prevPid = room.order[room.turnIndex];
   if (prevPid) room.turnStageBy.set(prevPid, "needDraw");
 
@@ -295,6 +274,25 @@ function givePenaltyCard(room, pid) {
   const hand = room.hands.get(pid) || [];
   hand.push({ card: c });
   room.hands.set(pid, hand);
+}
+
+function actingGuard(room, socket) {
+  if (room.phase !== "playing") return "Not in playing phase";
+  if (room.kargo) {
+    const activeFinal = room.kargo.finalTurns[room.kargo.index] ?? null;
+    if (activeFinal !== socket.id) return "Not your final turn";
+  } else {
+    if (room.order[room.turnIndex] !== socket.id) return "Not your turn";
+  }
+  return null;
+}
+
+function consumeDrawnToUsed(room, pid) {
+  const drawn = room.drawnBy.get(pid);
+  if (!drawn) return null;
+  room.usedPile.push(drawn);
+  room.drawnBy.delete(pid);
+  return drawn;
 }
 
 /* -------------------- Ready gate / deal -------------------- */
@@ -324,46 +322,20 @@ function dealHands(room) {
   }
 
   room.turnIndex = 0;
-  room.readyGateOpen = true;
   room.phase = "ready";
 }
-
 function allReady(room) {
   for (const pid of room.order) if (!room.ready.get(pid)) return false;
   return true;
 }
 function closeReadyGate(room) {
-  room.readyGateOpen = false;
   room.phase = "playing";
   startTurn(room, room.order[room.turnIndex]);
 }
 
-/* -------------------- Guards -------------------- */
-function actingGuard(room, socket) {
-  if (room.phase !== "playing") return "Not in playing phase";
-  if (room.kargo) {
-    const activeFinal = room.kargo.finalTurns[room.kargo.index] ?? null;
-    if (activeFinal !== socket.id) return "Not your final turn";
-  } else {
-    if (room.order[room.turnIndex] !== socket.id) return "Not your turn";
-  }
-  return null;
-}
-
-function consumeDrawnToUsed(room, pid) {
-  const drawn = room.drawnBy.get(pid);
-  if (!drawn) return null;
-  room.usedPile.push(drawn);
-  room.drawnBy.delete(pid);
-  return drawn;
-}
-
 /* -------------------- Public view -------------------- */
 function publicRoomView(room, viewerId) {
-  tickClaim(room);
-
-  const usedTop = room.usedPile.length ? room.usedPile[room.usedPile.length - 1] : null;
-  const usedTop2 = room.usedPile.slice(-2); // last two cards
+  const usedTop2 = room.usedPile.slice(-2);
 
   const k = room.kargo
     ? {
@@ -396,13 +368,15 @@ function publicRoomView(room, viewerId) {
     turnPlayerId: curPid,
     turnStage: stage,
 
-    usedTop,
     usedTop2,
     usedCount: room.usedPile.length,
-
-    // claim info (top of used pile is claimable temporarily)
     claim: room.claim
-      ? { state: room.claim.state, openedAt: room.claim.openedAt, rank: room.claim.card.rank }
+      ? {
+          rank: room.claim.rank,
+          state: room.claim.state, // "open" | "won"
+          winnerId: room.claim.winnerId ?? null,
+          winAt: room.claim.winAt ?? null,
+        }
       : null,
 
     lastRound: room.lastRound ?? null,
@@ -414,18 +388,18 @@ function publicRoomView(room, viewerId) {
     players: room.order.map((pid) => {
       const name = room.players.get(pid)?.name ?? "Unknown";
       const hand = room.hands.get(pid) || [];
-      const readyMine = !!room.ready.get(viewerId);
+      const viewerReady = !!room.ready.get(viewerId);
 
-      // READY: viewer sees their bottom 2 (slot 0/1) until they click Ready
-      // PLAYING: everything hidden (except peek results via power events)
       const slots = hand.map((slot, idx) => {
         if (!slot) return null;
 
-        if (room.phase === "ready" && pid === viewerId && !readyMine) {
+        // READY: viewer sees their bottom 2 (slot 0/1) until they click Ready
+        if (room.phase === "ready" && pid === viewerId && !viewerReady) {
           if (idx === 0 || idx === 1) return { faceUp: true, card: slot.card };
           return { faceUp: false, card: null };
         }
 
+        // PLAYING: always hidden
         return { faceUp: false, card: null };
       });
 
@@ -438,7 +412,6 @@ function publicRoomView(room, viewerId) {
 }
 
 function broadcastRoom(room) {
-  tickClaim(room);
   for (const pid of room.order) io.to(pid).emit("room:update", publicRoomView(room, pid));
 }
 
@@ -466,8 +439,6 @@ io.on("connection", (socket) => {
       turnStageBy: new Map(),
 
       ready: new Map(),
-      readyGateOpen: false,
-
       kargo: null,
       powerState: new Map(),
 
@@ -565,7 +536,9 @@ io.on("connection", (socket) => {
     broadcastRoom(room);
   });
 
-  // Tap a hand slot to resolve draw: match -> discard both. mismatch -> swap + claimable top of used pile
+  // Tap slot to resolve draw:
+  // - match -> discard both into used
+  // - mismatch -> swap, moved-out card goes to used and becomes claimable until turn ends
   socket.on("turn:resolveDrawTap", ({ code, slotIndex }) => {
     const room = rooms.get(code);
     if (!room) return;
@@ -595,20 +568,26 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // mismatch swap: selected card becomes claimable (but it's in used pile)
     const replaced = slot.card;
     hand[slotIndex] = { card: drawn };
     room.drawnBy.delete(socket.id);
 
     room.usedPile.push(replaced);
-    room.claim = { state: "open", openedAt: nowMs(), card: replaced };
+
+    // claim stays until turn ends; anyone (including thrower) can claim
+    room.claim = {
+      rank: replaced.rank,
+      state: "open", // open -> won
+      winnerId: null,
+      winAt: null,
+    };
 
     if (maybeEndIfOut(room, socket.id)) return broadcastRoom(room);
     room.turnStageBy.set(socket.id, "awaitEnd");
     broadcastRoom(room);
   });
 
-  // Throw pair: requires a drawn card; must be actual pair; drawn is kept (replaces one slot)
+  // Throw pair (requires drawn) and keeps drawn by replacing slot a, removes slot b
   socket.on("turn:discardPair", ({ code, a, b }) => {
     const room = rooms.get(code);
     if (!room) return;
@@ -646,7 +625,6 @@ io.on("connection", (socket) => {
     broadcastRoom(room);
   });
 
-  // Discard drawn to used
   socket.on("turn:discardDrawn", ({ code }) => {
     const room = rooms.get(code);
     if (!room) return;
@@ -677,38 +655,43 @@ io.on("connection", (socket) => {
     broadcastRoom(room);
   });
 
-  // Claim top of used pile card (when claim window is open)
+  // CLAIM (from used pile top claim rank): ANYONE including thrower
   socket.on("used:claim", ({ code, slotIndex }) => {
     const room = rooms.get(code);
     if (!room) return;
     if (room.phase !== "playing") return;
 
-    tickClaim(room);
     const c = room.claim;
     if (!c) return socket.emit("error:msg", "No claimable card right now");
 
-    // If someone clicks after winner within 0.2s => penalty
-    if (c.state === "postWin") {
-      if (nowMs() <= c.postWinUntil) givePenaltyCard(room, socket.id);
-      broadcastRoom(room);
+    // If already won: only second person within 0.2s gets penalty
+    if (c.state === "won") {
+      if (c.winAt && nowMs() - c.winAt <= 200) {
+        givePenaltyCard(room, socket.id);
+        broadcastRoom(room);
+      }
       return;
     }
 
+    // Open: check selected slot
     const hand = room.hands.get(socket.id) || [];
     const slot = hand[slotIndex];
     if (!slot) return socket.emit("error:msg", "Empty slot");
 
-    if (slot.card.rank !== c.card.rank) {
+    if (slot.card.rank !== c.rank) {
+      // wrong placement => penalty
       givePenaltyCard(room, socket.id);
       broadcastRoom(room);
       return;
     }
 
-    // Winner discards their matching card + (claim card already in used pile)
+    // Winner discards their matching card (claim card is conceptually already in used)
     room.usedPile.push(slot.card);
     hand[slotIndex] = null;
 
-    room.claim = { state: "postWin", postWinUntil: nowMs() + 200, openedAt: c.openedAt, card: c.card };
+    c.state = "won";
+    c.winnerId = socket.id;
+    c.winAt = nowMs();
 
     if (maybeEndIfOut(room, socket.id)) return broadcastRoom(room);
     broadcastRoom(room);
@@ -766,13 +749,11 @@ io.on("connection", (socket) => {
       return;
     }
     if (r === "J") {
-      // opponent-first unseen swap: pick opponent card, then pick your card to swap (no reveal)
       room.powerState.set(socket.id, { mode: "jPickOpponentCard", drawnRank: r, target: null });
       broadcastRoom(room);
       return;
     }
     if (r === "Q") {
-      // opponent-first seen swap: pick opponent card to peek, then decide, then pick your card to swap if accept
       room.powerState.set(socket.id, { mode: "qPickOpponentCard", drawnRank: r, target: null });
       broadcastRoom(room);
       return;
@@ -803,7 +784,6 @@ io.on("connection", (socket) => {
 
     socket.emit("power:result", { type: "peekSelf", card: slot.card });
 
-    // consume drawn power card into used pile (single-use)
     consumeDrawnToUsed(room, socket.id);
     room.turnStageBy.set(socket.id, "awaitEnd");
     room.powerState.set(socket.id, { mode: "none" });
@@ -838,7 +818,6 @@ io.on("connection", (socket) => {
     }
 
     if (ps.mode === "qPickOpponentCard") {
-      // reveal opponent card, then decision
       socket.emit("power:result", { type: "qPeekThenDecide", card: otherSlot.card });
       room.powerState.set(socket.id, { ...ps, mode: "qAwaitDecision", target: { otherPlayerId, otherSlotIndex } });
       broadcastRoom(room);
@@ -864,7 +843,6 @@ io.on("connection", (socket) => {
     const otherSlot = otherHand[otherSlotIndex];
     if (!otherSlot) return socket.emit("error:msg", "Other slot empty");
 
-    // unseen swap (no reveal; but server swaps)
     const tmp = mySlot.card;
     mySlot.card = otherSlot.card;
     otherSlot.card = tmp;
@@ -890,7 +868,6 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // accept -> now choose YOUR card to swap with that opponent card
     room.powerState.set(socket.id, { ...ps, mode: "qPickMyCard" });
     broadcastRoom(room);
   });
