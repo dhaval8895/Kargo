@@ -16,7 +16,7 @@ function isRedSuit(suit) {
   return suit === "H" || suit === "D";
 }
 
-function PlayingCard({ slot, onClick, disabled, small = false }) {
+function PlayingCard({ slot, onClick, disabled, small = false, stackedOffset = 0 }) {
   const hasCard = !!slot;
   const faceUp = !!slot?.faceUp && !!slot?.card;
 
@@ -42,6 +42,7 @@ function PlayingCard({ slot, onClick, disabled, small = false }) {
     overflow: "hidden",
     display: "grid",
     placeItems: "center",
+    transform: `translate(${stackedOffset}px, ${stackedOffset}px)`,
   };
 
   const corner = {
@@ -135,6 +136,10 @@ function PlayingCard({ slot, onClick, disabled, small = false }) {
   );
 }
 
+function cardRankFromSlot(slot) {
+  return slot?.card?.rank ?? null;
+}
+
 /* ---------- App ---------- */
 export default function App() {
   const socket = useMemo(() => {
@@ -152,6 +157,8 @@ export default function App() {
   const [drawn, setDrawn] = useState(null);
   const [peekDone, setPeekDone] = useState(false);
 
+  const [powerPeek, setPowerPeek] = useState(null); // { title, card }
+
   useEffect(() => {
     if (!socket) return;
 
@@ -161,7 +168,6 @@ export default function App() {
     const onUpdate = (r) => {
       setRoom(r);
       setError("");
-      // If round ended and phase returned to lobby, clear drawn/peek locally
       if (r?.phase !== "playing") {
         setDrawn(null);
         setPeekDone(false);
@@ -171,12 +177,21 @@ export default function App() {
       setDrawn(c);
       setError("");
     };
+    const onPower = (payload) => {
+      if (!payload?.card) return;
+      if (payload.type === "peekSelf") {
+        setPowerPeek({ title: `Peek: your slot ${payload.slotIndex}`, card: payload.card });
+      } else if (payload.type === "peekOther") {
+        setPowerPeek({ title: `Peek: opponent slot ${payload.slotIndex}`, card: payload.card });
+      }
+    };
 
     socket.on("connect", onConnect);
     socket.on("disconnect", onDisconnect);
     socket.on("error:msg", onErr);
     socket.on("room:update", onUpdate);
     socket.on("turn:drawn", onDrawn);
+    socket.on("power:result", onPower);
 
     return () => {
       socket.off("connect", onConnect);
@@ -184,6 +199,7 @@ export default function App() {
       socket.off("error:msg", onErr);
       socket.off("room:update", onUpdate);
       socket.off("turn:drawn", onDrawn);
+      socket.off("power:result", onPower);
       socket.disconnect();
     };
   }, [socket]);
@@ -191,10 +207,22 @@ export default function App() {
   const myId = socket?.id;
   const me = room?.players?.find((p) => p.id === myId);
   const isHost = room?.hostId === myId;
-  const isMyTurn = room?.turnPlayerId === myId;
 
+  const isMyTurn = room?.turnPlayerId === myId;
   const canStart =
     !!room && isHost && room.phase === "lobby" && (room.players?.length ?? 0) >= 2;
+
+  const kargoActive = !!room?.kargo;
+  const activeFinalPlayerId = room?.kargo?.activeFinalPlayerId ?? null;
+  const amIActiveFinal = kargoActive ? activeFinalPlayerId === myId : false;
+  const amIAllowedToAct = room?.phase === "playing" && (kargoActive ? amIActiveFinal : isMyTurn);
+
+  // Determine if user has any visible power cards
+  const mySlots = me?.slots || [];
+  const myVisibleRanks = mySlots.map(cardRankFromSlot);
+
+  const hasPower7or8 = myVisibleRanks.some((r) => r === "7" || r === "8");
+  const hasPower9or10 = myVisibleRanks.some((r) => r === "9" || r === "10");
 
   if (!SERVER_URL) {
     return (
@@ -212,7 +240,9 @@ export default function App() {
       <div style={header}>
         <div>
           <h1 style={{ margin: 0 }}>KARGO</h1>
-          <div style={{ fontSize: 12, opacity: 0.6 }}>UI v3 (used pile visible + instant round end)</div>
+          <div style={{ fontSize: 12, opacity: 0.6 }}>
+            UI v4 (KARGO call + unseen match + stacked used pile)
+          </div>
           <div style={{ opacity: 0.75, fontSize: 13 }}>
             {connected ? "connected" : "disconnected"} • Server: {SERVER_URL}
           </div>
@@ -285,13 +315,22 @@ export default function App() {
                   <b>{room.players.find((p) => p.id === room.turnPlayerId)?.name ?? "—"}</b>
                 </div>
 
+                {kargoActive && (
+                  <div style={{ marginTop: 10, padding: 10, borderRadius: 12, border: "1px solid #fde68a", background: "#fffbeb" }}>
+                    <div style={{ fontWeight: 900 }}>
+                      KARGO called by {room.kargo.callerName}
+                    </div>
+                    <div style={{ fontSize: 12, opacity: 0.75 }}>
+                      Final turns in progress… current final player:{" "}
+                      <b>{room.players.find((p) => p.id === activeFinalPlayerId)?.name ?? "—"}</b>
+                    </div>
+                  </div>
+                )}
+
                 {room.lastRound && (
                   <div style={{ marginTop: 10, padding: 10, borderRadius: 12, border: "1px solid #e5e7eb", background: "#f8fafc" }}>
                     <div style={{ fontWeight: 900 }}>
-                      Last round winner: {room.lastRound.winnerName} (−20)
-                    </div>
-                    <div style={{ fontSize: 12, opacity: 0.7 }}>
-                      Round ended instantly when winner hit 0 cards.
+                      Last round: {room.lastRound.winnerName} • {room.lastRound.reason}
                     </div>
                   </div>
                 )}
@@ -336,7 +375,7 @@ export default function App() {
           {room.phase === "playing" && (
             <>
               <div style={cardWrap}>
-                <h3 style={{ marginTop: 0 }}>Center (Used Cards)</h3>
+                <h3 style={{ marginTop: 0 }}>Center</h3>
 
                 <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
                   <div>
@@ -348,36 +387,45 @@ export default function App() {
                       disabled={true}
                     />
                     <div style={{ maxWidth: 280, fontSize: 12, opacity: 0.75, lineHeight: 1.35, marginTop: 8 }}>
-                      Claim by clicking a card in your hand that matches the rank.
-                      Wrong claim = +1 penalty card, and the used card stays.
+                      Click a matching rank in your hand to claim. Wrong claim = +1 penalty card.
                     </div>
                   </div>
 
                   <div style={{ flex: 1, minWidth: 360 }}>
                     <div style={{ opacity: 0.75, fontSize: 13, marginBottom: 6 }}>
-                      Used pile (always visible)
+                      Used pile (top card stacked)
                     </div>
-                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                      {(room.usedPilePreview || []).length === 0 ? (
-                        <div style={{ fontSize: 12, opacity: 0.6 }}>No used cards yet.</div>
-                      ) : (
-                        room.usedPilePreview.map((c) => (
-                          <PlayingCard key={c.id} slot={{ faceUp: true, card: c }} disabled={true} small />
-                        ))
-                      )}
-                    </div>
-                    <div style={{ fontSize: 12, opacity: 0.6, marginTop: 8 }}>
-                      When the deck runs out, the used pile reshuffles automatically.
+
+                    <div style={{ position: "relative", height: 140, display: "grid", placeItems: "start" }}>
+                      {/* Fake stack behind */}
+                      <div style={{ position: "absolute", left: 0, top: 0 }}>
+                        <PlayingCard slot={room.usedPileTop ? { faceUp: true, card: room.usedPileTop } : null} disabled={true} stackedOffset={10} />
+                      </div>
+                      <div style={{ position: "absolute", left: 0, top: 0 }}>
+                        <PlayingCard slot={room.usedPileTop ? { faceUp: true, card: room.usedPileTop } : null} disabled={true} stackedOffset={5} />
+                      </div>
+                      <div style={{ position: "absolute", left: 0, top: 0 }}>
+                        <PlayingCard slot={room.usedPileTop ? { faceUp: true, card: room.usedPileTop } : null} disabled={true} stackedOffset={0} />
+                      </div>
+
+                      <div style={{ marginLeft: 95, marginTop: 10, fontSize: 12, opacity: 0.75 }}>
+                        Cards in used pile: <b>{room.usedPileCount}</b>
+                        <div style={{ fontSize: 12, opacity: 0.65, marginTop: 6 }}>
+                          When deck ends, used pile reshuffles automatically.
+                        </div>
+                      </div>
                     </div>
                   </div>
 
-                  <div style={{ flex: 1, minWidth: 340 }}>
-                    <div style={{ opacity: 0.75, fontSize: 13, marginBottom: 6 }}>Your turn actions</div>
+                  <div style={{ flex: 1, minWidth: 360 }}>
+                    <div style={{ opacity: 0.75, fontSize: 13, marginBottom: 6 }}>
+                      Your actions {kargoActive ? "(final turns mode)" : ""}
+                    </div>
 
                     <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                       <button
                         style={btn}
-                        disabled={!isMyTurn || !!drawn}
+                        disabled={!amIAllowedToAct || !!drawn}
                         onClick={() => socket.emit("turn:draw", { code: room.code })}
                       >
                         Draw
@@ -385,7 +433,7 @@ export default function App() {
 
                       <button
                         style={btnGhost}
-                        disabled={!isMyTurn || !drawn}
+                        disabled={!amIAllowedToAct || !drawn}
                         onClick={() => {
                           socket.emit("turn:throwDrawn", { code: room.code });
                           setDrawn(null);
@@ -396,7 +444,7 @@ export default function App() {
 
                       <button
                         style={btnGhost}
-                        disabled={!isMyTurn}
+                        disabled={!amIAllowedToAct}
                         onClick={() => socket.emit("turn:end", { code: room.code })}
                       >
                         End turn
@@ -406,10 +454,51 @@ export default function App() {
                         style={btnGhost}
                         disabled={!room.viewer?.canDiscardSeenPair}
                         onClick={() => socket.emit("turn:discardSeenPair", { code: room.code })}
-                        title="Discard bottom two seen cards if same rank (requires keep this turn)"
                       >
                         Discard seen pair
                       </button>
+
+                      <button
+                        style={btnWarn}
+                        disabled={!amIAllowedToAct || !!drawn || kargoActive}
+                        onClick={() => socket.emit("kargo:call", { code: room.code })}
+                        title="Call KARGO (only on your turn and with no drawn card pending)"
+                      >
+                        CALL KARGO
+                      </button>
+                    </div>
+
+                    {/* Power buttons (basic) */}
+                    <div style={{ marginTop: 10, padding: 12, border: "1px solid #e5e7eb", borderRadius: 12 }}>
+                      <div style={{ fontWeight: 900, marginBottom: 6 }}>Power cards</div>
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                        <button
+                          style={btnGhost}
+                          disabled={!hasPower7or8}
+                          onClick={() => {
+                            // peek your slot 0 by default; you can change later
+                            socket.emit("power:peekSelf", { code: room.code, mySlotIndex: 0 });
+                          }}
+                        >
+                          7/8: Peek self (slot 0)
+                        </button>
+
+                        <button
+                          style={btnGhost}
+                          disabled={!hasPower9or10 || (room.players?.length ?? 0) < 2}
+                          onClick={() => {
+                            // peek first other player slot 0 by default
+                            const other = room.players.find((p) => p.id !== myId);
+                            if (!other) return;
+                            socket.emit("power:peekOther", { code: room.code, otherPlayerId: other.id, otherSlotIndex: 0 });
+                          }}
+                        >
+                          9/10: Peek other (slot 0)
+                        </button>
+                      </div>
+                      <div style={{ fontSize: 12, opacity: 0.65, marginTop: 6 }}>
+                        Next: J swap + Q peek-then-swap (coming next step).
+                      </div>
                     </div>
 
                     {!peekDone && (
@@ -430,23 +519,34 @@ export default function App() {
                           <div style={{ fontWeight: 900 }}>Drawn:</div>
                           <PlayingCard slot={{ faceUp: true, card: drawn }} disabled={true} />
                           <div style={{ fontSize: 12, opacity: 0.7 }}>
-                            To “discard drawn + match”, click a matching card slot in your hand below.
+                            Click a slot in your hand:
+                            <ul style={{ margin: "6px 0 0 18px" }}>
+                              <li>Seen slot: if match → discards both</li>
+                              <li>Unseen slot: tries match; mismatch → penalty + used card</li>
+                              <li>Or keep → swap with a NON-empty slot</li>
+                            </ul>
                           </div>
                         </div>
 
                         <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                          {[0, 1, 2, 3].map((i) => (
-                            <button
-                              key={i}
-                              style={btn}
-                              onClick={() => {
-                                socket.emit("turn:keepSwap", { code: room.code, slotIndex: i });
-                                setDrawn(null);
-                              }}
-                            >
-                              Keep → slot {i}
-                            </button>
-                          ))}
+                          {mySlots.map((slot, i) => {
+                            // cannot keep into empty slot
+                            const canKeepInto = !!slot;
+                            return (
+                              <button
+                                key={i}
+                                style={btn}
+                                disabled={!canKeepInto}
+                                onClick={() => {
+                                  socket.emit("turn:keepSwap", { code: room.code, slotIndex: i });
+                                  setDrawn(null);
+                                }}
+                                title={!canKeepInto ? "Cannot keep into an empty slot" : ""}
+                              >
+                                Keep → slot {i}
+                              </button>
+                            );
+                          })}
                         </div>
                       </div>
                     )}
@@ -459,7 +559,7 @@ export default function App() {
                   Your hand{" "}
                   <span style={{ fontSize: 12, opacity: 0.65 }}>
                     {drawn
-                      ? "(click a slot to discard drawn + match)"
+                      ? "(click a slot to match/discard or try-match unseen)"
                       : room.thrownCard
                       ? "(click a slot to claim active used card)"
                       : ""}
@@ -467,28 +567,42 @@ export default function App() {
                 </h3>
 
                 <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-                  {(me?.slots || []).map((slot, i) => {
+                  {mySlots.map((slot, i) => {
                     const displaySlot = !slot
                       ? null
                       : peekDone
                       ? { ...slot, faceUp: false }
                       : slot;
 
-                    const clickableForDiscardDrawn = !!drawn && isMyTurn;
-                    const clickableForClaimUsed = !!room.thrownCard;
+                    const canClaimUsed = !!room.thrownCard;
+                    const canInteractWithDrawn = !!drawn && amIAllowedToAct;
 
                     return (
                       <div key={i} style={{ textAlign: "center" }}>
                         <PlayingCard
                           slot={displaySlot}
-                          disabled={!(clickableForDiscardDrawn || clickableForClaimUsed)}
+                          disabled={!(canClaimUsed || canInteractWithDrawn)}
                           onClick={() => {
-                            if (clickableForDiscardDrawn) {
+                            if (canInteractWithDrawn) {
+                              // If empty do nothing
+                              if (!slot) return;
+
+                              // If slot is unseen -> use tryMatchUnseen
+                              if (!slot.faceUp) {
+                                socket.emit("turn:tryMatchUnseen", { code: room.code, slotIndex: i });
+                                setDrawn(null);
+                                return;
+                              }
+
+                              // slot is seen -> discard drawn if matching, else server will error
                               socket.emit("turn:discardDrawnMatch", { code: room.code, slotIndex: i });
                               setDrawn(null);
                               return;
                             }
-                            if (clickableForClaimUsed) {
+
+                            if (canClaimUsed) {
+                              // claim used card
+                              if (!slot) return;
                               socket.emit("thrown:claim", { code: room.code, slotIndex: i });
                             }
                           }}
@@ -500,7 +614,7 @@ export default function App() {
                 </div>
 
                 <div style={{ marginTop: 12, opacity: 0.75, fontSize: 13 }}>
-                  Win condition: hit 0 cards. The round ends instantly and scores apply.
+                  Penalties add new unseen slots (slot 5, 6, …). Win by hitting 0 cards.
                 </div>
               </div>
             </>
@@ -522,6 +636,18 @@ export default function App() {
               ))}
             </div>
           </div>
+
+          {powerPeek && (
+            <div style={modalBackdrop} onClick={() => setPowerPeek(null)}>
+              <div style={modalCard} onClick={(e) => e.stopPropagation()}>
+                <div style={{ fontWeight: 900, marginBottom: 10 }}>{powerPeek.title}</div>
+                <PlayingCard slot={{ faceUp: true, card: powerPeek.card }} disabled={true} />
+                <button style={{ ...btn, marginTop: 14 }} onClick={() => setPowerPeek(null)}>
+                  Close
+                </button>
+              </div>
+            </div>
+          )}
         </>
       )}
     </div>
@@ -589,6 +715,16 @@ const btnGhost = {
   fontWeight: 800,
 };
 
+const btnWarn = {
+  padding: "10px 12px",
+  borderRadius: 12,
+  border: "1px solid #b45309",
+  background: "#f59e0b",
+  color: "#111827",
+  cursor: "pointer",
+  fontWeight: 900,
+};
+
 const errorBox = {
   marginTop: 12,
   padding: 10,
@@ -634,4 +770,22 @@ const pill2 = {
   border: "1px solid #a5f3fc",
   color: "#155e75",
   fontWeight: 900,
+};
+
+const modalBackdrop = {
+  position: "fixed",
+  inset: 0,
+  background: "rgba(0,0,0,0.35)",
+  display: "grid",
+  placeItems: "center",
+  zIndex: 50,
+};
+
+const modalCard = {
+  background: "white",
+  borderRadius: 16,
+  border: "1px solid #e5e7eb",
+  padding: 16,
+  width: 280,
+  boxShadow: "0 20px 60px rgba(0,0,0,0.25)",
 };
