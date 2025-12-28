@@ -1,5 +1,5 @@
 // client/src/App.jsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL;
@@ -105,9 +105,9 @@ const slotLabel = {
   borderRadius: 999,
 };
 
-function PlayingCard({ slot, onClick, disabled, small = false, labelText }) {
-  const hasCard = !!slot;
-  const faceUp = !!slot?.faceUp && !!slot?.card;
+function PlayingCard({ slot, onClick, disabled, small = false, labelText, forceBack = false, forceFrontCard = null }) {
+  const hasCard = !!slot || !!forceFrontCard || forceBack;
+  const faceUp = !!forceFrontCard || (!!slot?.faceUp && !!slot?.card);
 
   const W = small ? 56 : 86;
   const H = small ? 78 : 122;
@@ -157,7 +157,7 @@ function PlayingCard({ slot, onClick, disabled, small = false, labelText }) {
   return (
     <div style={outer} onClick={disabled ? undefined : onClick}>
       {faceUp ? (
-        <CardFace card={slot.card} small={small} />
+        <CardFace card={forceFrontCard || slot.card} small={small} />
       ) : (
         <>
           <div style={backPattern} />
@@ -201,7 +201,7 @@ function UsedPileStack({ topCard, count }) {
       <div style={{ ...base, left: 6, top: 8 }} />
       <div style={{ ...base, left: 3, top: 4 }} />
       <div style={{ position: "absolute", left: 0, top: 0 }}>
-        <PlayingCard slot={topCard ? { faceUp: true, card: topCard } : null} disabled={true} />
+        <PlayingCard slot={topCard ? { faceUp: true, card: topCard } : null} forceBack={!topCard} disabled={true} />
       </div>
       <div style={{ position: "absolute", left: 98, top: 10, fontSize: 12, opacity: 0.75 }}>
         Used: <b>{count}</b>
@@ -235,8 +235,8 @@ function AppInner() {
   const [powerPeek, setPowerPeek] = useState(null);
   const [winnerSplash, setWinnerSplash] = useState(null);
 
-  // NEW: local “I already hit ready so hide my peek cards now”
-  const [readyLocalHide, setReadyLocalHide] = useState(false);
+  const [turnToast, setTurnToast] = useState(false);
+  const prevTurnPidRef = useRef(null);
 
   useEffect(() => {
     if (!socket) return;
@@ -249,21 +249,22 @@ function AppInner() {
       setRoom(r);
       setError("");
 
-      // reset local hide when new round starts
-      if (r?.phase === "ready") {
-        // if you are not ready yet, show peek
-        const mineReady = !!r?.readyState?.mine;
-        setReadyLocalHide(mineReady);
-      } else {
-        setReadyLocalHide(false);
-      }
-
       if (r?.phase !== "playing") setDrawn(null);
 
       if (r?.lastRound?.winnerName) {
         setWinnerSplash({ name: r.lastRound.winnerName });
         setTimeout(() => setWinnerSplash(null), 2500);
       }
+
+      // your turn popup
+      const myId = socket.id;
+      const prevTurn = prevTurnPidRef.current;
+      const curTurn = r?.turnPlayerId ?? null;
+      if (myId && curTurn === myId && prevTurn !== myId && r?.phase === "playing") {
+        setTurnToast(true);
+        setTimeout(() => setTurnToast(false), 1400);
+      }
+      prevTurnPidRef.current = curTurn;
     };
 
     const onDrawn = (c) => {
@@ -275,6 +276,13 @@ function AppInner() {
       if (!payload?.card) return;
       if (payload.type === "peekSelf") setPowerPeek({ title: `Peek: your card`, card: payload.card });
       if (payload.type === "peekOther") setPowerPeek({ title: `Peek: opponent card`, card: payload.card });
+      if (payload.type === "qPeekThenDecide") {
+        setPowerPeek({
+          title: `Q peeked card`,
+          card: payload.card,
+          qDecision: true,
+        });
+      }
     };
 
     socket.on("connect", onConnect);
@@ -300,32 +308,29 @@ function AppInner() {
   const players = room?.players || [];
   const scoreboard = room?.scoreboard || [];
   const stats = room?.stats || [];
+  const roundBoard = room?.roundBoard || null;
 
   const me = players.find((p) => p.id === myId) || null;
+
   const isHost = room?.hostId === myId;
   const isMyTurn = room?.turnPlayerId === myId;
 
   const kargoActive = !!room?.kargo;
   const activeFinalPlayerId = room?.kargo?.activeFinalPlayerId ?? null;
   const amIActiveFinal = kargoActive ? activeFinalPlayerId === myId : false;
+
   const amIAllowedToAct = room?.phase === "playing" && (kargoActive ? amIActiveFinal : isMyTurn);
 
-  const swapOffer = room?.swapOffer ?? null;
   const inReadyPhase = room?.phase === "ready";
   const readyMine = room?.readyState?.mine ?? false;
 
   const powerMode = room?.powerState?.mode ?? "none";
 
   const drawnRank = drawn?.rank ?? null;
-  const powerRank = drawnRank;
-  const canPower = !!powerRank && ["7", "8", "9", "10", "J", "Q"].includes(powerRank);
+  const canPower = !!drawnRank && ["7", "8", "9", "10", "J", "Q"].includes(drawnRank);
 
-  // READY: show ONLY bottom 2 cards, ONLY once
-  const readyPeekSlots = useMemo(() => {
-    if (!me?.slots) return [];
-    // bottom two slots are indices 0 and 1 in server deal
-    return [me.slots?.[0] || null, me.slots?.[1] || null, me.slots?.[2] || null, me.slots?.[3] || null];
-  }, [me]);
+  // SLOT ORDER DISPLAY: top row = slot 2 & 3, bottom row = slot 0 & 1
+  const slotDisplayOrder = [2, 3, 0, 1];
 
   if (!SERVER_URL) {
     return (
@@ -337,6 +342,10 @@ function AppInner() {
       </div>
     );
   }
+
+  const roundSorted = roundBoard?.deltas
+    ? [...roundBoard.deltas].sort((a, b) => a.delta - b.delta)
+    : null;
 
   return (
     <div style={page}>
@@ -350,12 +359,27 @@ function AppInner() {
           0% { background-position: 0% 50%; }
           100% { background-position: 100% 50%; }
         }
+        @keyframes toast {
+          0% { transform: translateY(-10px); opacity: 0; }
+          25% { transform: translateY(0px); opacity: 1; }
+          75% { transform: translateY(0px); opacity: 1; }
+          100% { transform: translateY(-10px); opacity: 0; }
+        }
       `}</style>
+
+      {/* your turn popup */}
+      {turnToast && (
+        <div style={toastWrap}>
+          <div style={toastCard}>Your turn</div>
+        </div>
+      )}
 
       <div style={header}>
         <div>
           <h1 style={{ margin: 0 }}>KARGO</h1>
-          <div style={{ fontSize: 12, opacity: 0.6 }}>Ready peek once • Powers consume drawn card • Cleaner UI</div>
+          <div style={{ fontSize: 12, opacity: 0.6 }}>
+            Always hidden • 7/8 peek only • 9/10 peek other • J unseen swap • Q seen swap
+          </div>
           <div style={{ opacity: 0.75, fontSize: 13 }}>
             {connected ? "connected" : "disconnected"} • Server: {SERVER_URL}
           </div>
@@ -413,6 +437,7 @@ function AppInner() {
             </div>
           )}
 
+          {/* SCOREBOARDS */}
           <div style={cardWrap}>
             <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
               <div>
@@ -421,10 +446,36 @@ function AppInner() {
                 <div style={{ opacity: 0.75, fontSize: 13, marginTop: 6 }}>
                   Phase: <b>{room.phase}</b> • Turn: <b>{players.find((p) => p.id === room.turnPlayerId)?.name ?? "—"}</b>
                 </div>
+                {room.kargo && (
+                  <div style={{ marginTop: 10, padding: 10, borderRadius: 12, border: "1px solid #fde68a", background: "#fffbeb" }}>
+                    <div style={{ fontWeight: 900 }}>KARGO called by {room.kargo.callerName}</div>
+                    <div style={{ fontSize: 12, opacity: 0.75 }}>
+                      Final player: <b>{players.find((p) => p.id === room.kargo.activeFinalPlayerId)?.name ?? "—"}</b>
+                    </div>
+                  </div>
+                )}
               </div>
 
+              {/* Round board */}
               <div style={{ minWidth: 260 }}>
-                <div style={{ opacity: 0.75, fontSize: 13 }}>Scoreboard (Points)</div>
+                <div style={{ opacity: 0.75, fontSize: 13 }}>Scoreboard (This round)</div>
+                {!roundSorted ? (
+                  <div style={{ marginTop: 6, fontSize: 12, opacity: 0.6 }}>No completed round yet.</div>
+                ) : (
+                  <div style={{ display: "grid", gap: 6, marginTop: 6 }}>
+                    {roundSorted.map((s) => (
+                      <div key={s.name} style={scoreRow}>
+                        <span>{s.name}</span>
+                        <b>{s.delta > 0 ? `+${s.delta}` : s.delta}</b>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Total points board */}
+              <div style={{ minWidth: 260 }}>
+                <div style={{ opacity: 0.75, fontSize: 13 }}>Scoreboard (Total points)</div>
                 <div style={{ display: "grid", gap: 6, marginTop: 6 }}>
                   {scoreboard
                     .slice()
@@ -438,8 +489,9 @@ function AppInner() {
                 </div>
               </div>
 
+              {/* Total games played */}
               <div style={{ minWidth: 260 }}>
-                <div style={{ opacity: 0.75, fontSize: 13 }}>Scoreboard (Rounds)</div>
+                <div style={{ opacity: 0.75, fontSize: 13 }}>Scoreboard (Games/rounds)</div>
                 <div style={{ display: "grid", gap: 6, marginTop: 6 }}>
                   {stats
                     .slice()
@@ -465,39 +517,37 @@ function AppInner() {
               </div>
             )}
 
-            {/* READY PHASE: show bottom two cards once */}
+            {/* READY PHASE: show ONLY bottom 2 cards (slot 0,1) once, top are hidden */}
             {inReadyPhase && (
               <div style={{ marginTop: 12, padding: 12, borderRadius: 12, border: "1px solid #e5e7eb", background: "#f8fafc" }}>
                 <div style={{ fontWeight: 900 }}>Ready check</div>
                 <div style={{ fontSize: 13, opacity: 0.75, marginTop: 6 }}>
-                  This is your only chance to see your bottom two cards. When you hit Ready, they hide again.
+                  This is your only chance to see your bottom two cards (slot 0 & slot 1). When you hit Ready, they hide again.
                 </div>
 
+                {/* 2x2 layout with correct ordering: top row slots 2,3 and bottom row slots 0,1 */}
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(2, max-content)", gap: 12, marginTop: 12 }}>
-                  {readyPeekSlots.slice(0, 4).map((slot, idx) => {
-                    const isBottomTwo = idx === 0 || idx === 1;
-                    const forceFaceUp = isBottomTwo && !readyLocalHide;
-                    const effectiveSlot =
-                      slot && forceFaceUp
-                        ? { ...slot, faceUp: true }
-                        : slot
-                        ? { ...slot, faceUp: false } // hide everything else during ready
-                        : null;
+                  {slotDisplayOrder.map((slotIndex) => {
+                    const s = me?.slots?.[slotIndex] ?? null;
 
-                    return <PlayingCard key={idx} slot={effectiveSlot} disabled={true} labelText={`slot ${idx}`} />;
+                    // server sends bottom slots faceUp+card until you press ready; top slots always hidden
+                    const forceFrontCard = s?.faceUp ? s?.card : null;
+
+                    return (
+                      <PlayingCard
+                        key={slotIndex}
+                        slot={s && !forceFrontCard ? { faceUp: false, card: null } : s}
+                        forceFrontCard={forceFrontCard}
+                        forceBack={!s}
+                        disabled={true}
+                        labelText={`slot ${slotIndex}`}
+                      />
+                    );
                   })}
                 </div>
 
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 12 }}>
-                  <button
-                    style={btn}
-                    disabled={readyMine}
-                    onClick={() => {
-                      // locally hide immediately after clicking
-                      setReadyLocalHide(true);
-                      socket.emit("game:ready", { code: room.code });
-                    }}
-                  >
+                  <button style={btn} disabled={readyMine} onClick={() => socket.emit("game:ready", { code: room.code })}>
                     {readyMine ? "Ready ✅" : "Ready"}
                   </button>
                 </div>
@@ -515,28 +565,6 @@ function AppInner() {
             {error && <div style={errorBox}>{error}</div>}
           </div>
 
-          {/* Swap offer prompt */}
-          {swapOffer && (
-            <div style={cardWrap}>
-              <h3 style={{ marginTop: 0 }}>Swap Offer</h3>
-              <div style={{ opacity: 0.8, marginBottom: 10 }}>
-                <b>{swapOffer.fromName}</b> wants your card in slot <b>{swapOffer.toSlotIndex}</b>. Tap which of their cards you want in exchange.
-              </div>
-
-              <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-                {(players.find((p) => p.id === swapOffer.fromId)?.slots || []).map((slot, idx) => (
-                  <PlayingCard
-                    key={idx}
-                    slot={slot ? { faceUp: false, card: null } : null}
-                    disabled={!slot}
-                    labelText={`slot ${idx}`}
-                    onClick={() => socket.emit("swap:accept", { code: room.code, offerId: swapOffer.id, fromSlotIndex: idx })}
-                  />
-                ))}
-              </div>
-            </div>
-          )}
-
           {/* Playing UI */}
           {room.phase === "playing" && (
             <div style={cardWrap}>
@@ -545,7 +573,14 @@ function AppInner() {
               <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
                 <div>
                   <div style={{ opacity: 0.75, fontSize: 13, marginBottom: 6 }}>Active used card (race claim)</div>
-                  <PlayingCard slot={room.thrownCard ? { faceUp: true, card: room.thrownCard } : null} disabled={true} />
+
+                  {/* Fix #6: if no active card, show facedown card */}
+                  <PlayingCard
+                    slot={room.thrownCard ? { faceUp: true, card: room.thrownCard } : null}
+                    forceBack={!room.thrownCard}
+                    disabled={true}
+                  />
+
                   <div style={{ maxWidth: 280, fontSize: 12, opacity: 0.75, lineHeight: 1.35, marginTop: 8 }}>
                     Wrong claim = +1 unseen penalty card.
                   </div>
@@ -556,41 +591,68 @@ function AppInner() {
                   <UsedPileStack topCard={room.usedPileTop} count={room.usedPileCount || 0} />
                 </div>
 
-                <div style={{ flex: 1, minWidth: 420 }}>
+                <div style={{ flex: 1, minWidth: 460 }}>
                   <div style={{ opacity: 0.75, fontSize: 13, marginBottom: 6 }}>
-                    Actions {kargoActive ? "(final turns)" : ""}
+                    Actions {kargoActive ? "(final turns)" : ""}{" "}
+                    {amIAllowedToAct ? "" : <span style={{ opacity: 0.7 }}>• waiting…</span>}
                   </div>
 
                   <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                    <button style={btn} disabled={!amIAllowedToAct || !!drawn || !!swapOffer} onClick={() => socket.emit("turn:draw", { code: room.code })}>
+                    <button style={btn} disabled={!amIAllowedToAct || !!drawn} onClick={() => socket.emit("turn:draw", { code: room.code })}>
                       Draw
-                    </button>
-
-                    <button style={btnGhost} disabled={!amIAllowedToAct || !!drawn || kargoActive || !!swapOffer} onClick={() => socket.emit("kargo:call", { code: room.code })}>
-                      Call KARGO
                     </button>
 
                     <button
                       style={btnGhost}
-                      disabled={!amIAllowedToAct || !drawn || !canPower || !!swapOffer}
+                      disabled={!amIAllowedToAct || !drawn}
+                      onClick={() => {
+                        // Fix #3: click drawn card again to discard to used pile
+                        socket.emit("turn:discardDrawn", { code: room.code });
+                        setDrawn(null);
+                      }}
+                      title="Discard the drawn card to used pile and end your turn"
+                    >
+                      Discard drawn
+                    </button>
+
+                    <button
+                      style={btnGhost}
+                      disabled={!amIAllowedToAct || !drawn || !canPower}
                       onClick={() => socket.emit("power:useOnce", { code: room.code })}
-                      title="Uses power ONCE, consumes drawn card, ends turn"
+                      title="Uses power ONCE and consumes the drawn power card"
                     >
                       Use Power
+                    </button>
+
+                    {/* Fix #7: Allow kargo even after drawn/swapped/etc (server now allows; if you have drawn pending it gets discarded automatically) */}
+                    <button style={btnGhost} disabled={!amIAllowedToAct || kargoActive} onClick={() => socket.emit("kargo:call", { code: room.code })}>
+                      Call KARGO
                     </button>
                   </div>
 
                   <div style={{ marginTop: 14, padding: 12, borderRadius: 12, border: "1px solid #e5e7eb" }}>
                     <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
                       <div style={{ fontWeight: 900 }}>Drawn:</div>
-                      <PlayingCard slot={drawn ? { faceUp: true, card: drawn } : null} disabled={true} />
+
+                      {/* Fix #3 also: clicking drawn card itself discards */}
+                      <PlayingCard
+                        slot={drawn ? { faceUp: true, card: drawn } : null}
+                        forceBack={!drawn}
+                        disabled={!drawn || !amIAllowedToAct}
+                        onClick={() => {
+                          if (!drawn || !amIAllowedToAct) return;
+                          socket.emit("turn:discardDrawn", { code: room.code });
+                          setDrawn(null);
+                        }}
+                      />
+
                       <div style={{ fontSize: 12, opacity: 0.7, maxWidth: 360 }}>
                         Tap one of your cards to resolve:
                         <ul style={{ margin: "6px 0 0 18px" }}>
                           <li>Match rank → discard both</li>
                           <li>No match → swap (no penalty)</li>
                         </ul>
-                        Power cards are single-use via the <b>Use Power</b> button.
+                        Power is single-use via <b>Use Power</b>. Cards remain hidden after actions.
                       </div>
                     </div>
 
@@ -603,34 +665,60 @@ function AppInner() {
                 </div>
               </div>
 
-              {/* Your hand in 2x2 grid */}
+              {/* Your hand (always hidden) */}
               <div style={{ marginTop: 16 }}>
                 <h3 style={{ marginTop: 0 }}>Your hand</h3>
 
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(2, max-content)", gap: 12 }}>
-                  {(me?.slots || []).map((slot, i) => (
-                    <PlayingCard
-                      key={i}
-                      slot={slot}
-                      labelText={`slot ${i}`}
-                      disabled={(!room.thrownCard && !drawn && powerMode !== "selfPeekPick")}
-                      onClick={() => {
-                        if (drawn && amIAllowedToAct) {
-                          socket.emit("turn:resolveDrawTap", { code: room.code, slotIndex: i });
-                          setDrawn(null);
-                          return;
-                        }
-                        if (room.thrownCard) {
-                          socket.emit("used:claim", { code: room.code, slotIndex: i });
-                          return;
-                        }
-                      }}
-                    />
-                  ))}
+                  {slotDisplayOrder.map((i) => {
+                    const slot = me?.slots?.[i] ?? null;
+                    const hasCard = !!slot;
+
+                    return (
+                      <PlayingCard
+                        key={i}
+                        // Always hidden during play
+                        slot={hasCard ? { faceUp: false, card: null } : null}
+                        forceBack={hasCard}
+                        labelText={`slot ${i}`}
+                        disabled={!amIAllowedToAct || (!room.thrownCard && !drawn && !["selfPeekPick", "jPickMyCard", "qPickMyCard"].includes(powerMode))}
+                        onClick={() => {
+                          if (!amIAllowedToAct) return;
+
+                          // power selection steps
+                          if (powerMode === "selfPeekPick") {
+                            socket.emit("power:tapSelfCard", { code: room.code, slotIndex: i });
+                            return;
+                          }
+                          if (powerMode === "jPickMyCard") {
+                            socket.emit("power:tapMyCardForSwap", { code: room.code, mySlotIndex: i });
+                            return;
+                          }
+                          if (powerMode === "qPickMyCard") {
+                            socket.emit("power:tapMyCardForQ", { code: room.code, mySlotIndex: i });
+                            return;
+                          }
+
+                          // normal draw resolution
+                          if (drawn) {
+                            socket.emit("turn:resolveDrawTap", { code: room.code, slotIndex: i });
+                            setDrawn(null);
+                            return;
+                          }
+
+                          // race claim
+                          if (room.thrownCard) {
+                            socket.emit("used:claim", { code: room.code, slotIndex: i });
+                            return;
+                          }
+                        }}
+                      />
+                    );
+                  })}
                 </div>
               </div>
 
-              {/* Opponents */}
+              {/* Opponents (always hidden) */}
               <div style={{ marginTop: 18 }}>
                 <h3 style={{ marginTop: 0 }}>Opponents</h3>
                 <div style={{ display: "grid", gap: 12 }}>
@@ -644,25 +732,33 @@ function AppInner() {
                         </div>
 
                         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
-                          {(p.slots || []).map((slot, idx) => (
-                            <PlayingCard
-                              key={idx}
-                              slot={slot ? { faceUp: false, card: null } : null}
-                              labelText={`slot ${idx}`}
-                              disabled={!slot || !drawn || !["otherPeekPick", "jPickOpponentCard", "qPickOpponentCard"].includes(powerMode)}
-                              onClick={() =>
-                                socket.emit("power:tapOtherCard", {
-                                  code: room.code,
-                                  otherPlayerId: p.id,
-                                  otherSlotIndex: idx,
-                                })
-                              }
-                            />
-                          ))}
+                          {[0, 1, 2, 3].map((idx) => {
+                            const hasCard = !!(p.slots?.[idx]);
+                            return (
+                              <PlayingCard
+                                key={idx}
+                                slot={hasCard ? { faceUp: false, card: null } : null}
+                                forceBack={hasCard}
+                                labelText={`slot ${idx}`}
+                                disabled={
+                                  !amIAllowedToAct ||
+                                  !hasCard ||
+                                  !["otherPeekPick", "jPickOpponentCard", "qPickOpponentCard"].includes(powerMode)
+                                }
+                                onClick={() =>
+                                  socket.emit("power:tapOtherCard", {
+                                    code: room.code,
+                                    otherPlayerId: p.id,
+                                    otherSlotIndex: idx,
+                                  })
+                                }
+                              />
+                            );
+                          })}
                         </div>
 
                         <div style={{ marginTop: 8, fontSize: 12, opacity: 0.6 }}>
-                          For 7/8 peek self and 9/10 peek other: click <b>Use Power</b> then tap a target card.
+                          9/10: Use Power → tap opponent card (peek) • J/Q: select your card then opponent card
                         </div>
                       </div>
                     ))}
@@ -689,15 +785,38 @@ function AppInner() {
             </div>
           </div>
 
-          {/* Peek modal */}
+          {/* Peek / Q decision modal */}
           {powerPeek && (
             <div style={modalBackdrop} onClick={() => setPowerPeek(null)}>
               <div style={modalCard} onClick={(e) => e.stopPropagation()}>
                 <div style={{ fontWeight: 900, marginBottom: 10 }}>{powerPeek.title}</div>
                 <PlayingCard slot={{ faceUp: true, card: powerPeek.card }} disabled={true} />
-                <button style={{ ...btn, marginTop: 14 }} onClick={() => setPowerPeek(null)}>
-                  Close
-                </button>
+                {powerPeek.qDecision ? (
+                  <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
+                    <button
+                      style={btn}
+                      onClick={() => {
+                        socket.emit("power:qDecision", { code: room.code, accept: true });
+                        setPowerPeek(null);
+                      }}
+                    >
+                      Swap
+                    </button>
+                    <button
+                      style={btnGhost}
+                      onClick={() => {
+                        socket.emit("power:qDecision", { code: room.code, accept: false });
+                        setPowerPeek(null);
+                      }}
+                    >
+                      Don’t swap
+                    </button>
+                  </div>
+                ) : (
+                  <button style={{ ...btn, marginTop: 14 }} onClick={() => setPowerPeek(null)}>
+                    Close
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -714,7 +833,7 @@ function dot(color) {
 
 const page = {
   fontFamily: "system-ui, -apple-system, Segoe UI, Roboto",
-  maxWidth: 1200,
+  maxWidth: 1300,
   margin: "0 auto",
   padding: 18,
   display: "grid",
@@ -829,7 +948,7 @@ const modalCard = {
   borderRadius: 16,
   border: "1px solid #e5e7eb",
   padding: 16,
-  width: 280,
+  width: 300,
   boxShadow: "0 20px 60px rgba(0,0,0,0.25)",
 };
 
@@ -857,4 +976,25 @@ const winnerName = {
   fontSize: 22,
   fontWeight: 1000,
   letterSpacing: 0.5,
+};
+
+const toastWrap = {
+  position: "fixed",
+  top: 16,
+  left: 0,
+  right: 0,
+  display: "grid",
+  placeItems: "center",
+  zIndex: 80,
+  pointerEvents: "none",
+};
+
+const toastCard = {
+  padding: "10px 14px",
+  borderRadius: 999,
+  border: "1px solid rgba(17,24,39,0.15)",
+  background: "rgba(255,255,255,0.95)",
+  boxShadow: "0 14px 40px rgba(0,0,0,0.18)",
+  fontWeight: 900,
+  animation: "toast 1400ms ease-out",
 };
