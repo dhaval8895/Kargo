@@ -1,3 +1,4 @@
+// client/src/App.jsx
 import React, { useEffect, useMemo, useState } from "react";
 import { io } from "socket.io-client";
 
@@ -14,7 +15,8 @@ function suitSymbol(suit) {
 function isRedSuit(suit) {
   return suit === "H" || suit === "D";
 }
-function PlayingCard({ slot, onClick, disabled }) {
+
+function PlayingCard({ slot, onClick, disabled, small = false }) {
   const hasCard = !!slot;
   const faceUp = !!slot?.faceUp && !!slot?.card;
 
@@ -23,12 +25,15 @@ function PlayingCard({ slot, onClick, disabled }) {
   const sym = suitSymbol(suit);
   const red = isRedSuit(suit);
 
+  const W = small ? 56 : 82;
+  const H = small ? 78 : 116;
+
   const outer = {
-    width: 82,
-    height: 116,
+    width: W,
+    height: H,
     borderRadius: 14,
     border: "1px solid #111827",
-    boxShadow: "0 6px 16px rgba(0,0,0,0.12)",
+    boxShadow: small ? "0 2px 8px rgba(0,0,0,0.12)" : "0 6px 16px rgba(0,0,0,0.12)",
     cursor: disabled ? "not-allowed" : "pointer",
     opacity: disabled ? 0.55 : 1,
     userSelect: "none",
@@ -36,7 +41,7 @@ function PlayingCard({ slot, onClick, disabled }) {
     position: "relative",
     overflow: "hidden",
     display: "grid",
-    placeItems: "center"
+    placeItems: "center",
   };
 
   const corner = {
@@ -44,9 +49,9 @@ function PlayingCard({ slot, onClick, disabled }) {
     top: 8,
     left: 8,
     fontWeight: 900,
-    fontSize: 14,
+    fontSize: small ? 12 : 14,
     lineHeight: 1,
-    color: faceUp ? (red ? "#b91c1c" : "#111827") : "rgba(255,255,255,0.9)"
+    color: faceUp ? (red ? "#b91c1c" : "#111827") : "rgba(255,255,255,0.9)",
   };
 
   const corner2 = {
@@ -54,16 +59,16 @@ function PlayingCard({ slot, onClick, disabled }) {
     bottom: 8,
     right: 8,
     fontWeight: 900,
-    fontSize: 14,
+    fontSize: small ? 12 : 14,
     lineHeight: 1,
     transform: "rotate(180deg)",
-    color: faceUp ? (red ? "#b91c1c" : "#111827") : "rgba(255,255,255,0.9)"
+    color: faceUp ? (red ? "#b91c1c" : "#111827") : "rgba(255,255,255,0.9)",
   };
 
   const pip = {
-    fontSize: 42,
+    fontSize: small ? 28 : 42,
     fontWeight: 900,
-    color: faceUp ? (red ? "#b91c1c" : "#111827") : "rgba(255,255,255,0.9)"
+    color: faceUp ? (red ? "#b91c1c" : "#111827") : "rgba(255,255,255,0.9)",
   };
 
   const backPattern = {
@@ -72,7 +77,7 @@ function PlayingCard({ slot, onClick, disabled }) {
     borderRadius: 10,
     border: "1px solid rgba(255,255,255,0.25)",
     background:
-      "repeating-linear-gradient(45deg, rgba(255,255,255,0.12) 0, rgba(255,255,255,0.12) 6px, rgba(255,255,255,0.05) 6px, rgba(255,255,255,0.05) 12px)"
+      "repeating-linear-gradient(45deg, rgba(255,255,255,0.12) 0, rgba(255,255,255,0.12) 6px, rgba(255,255,255,0.05) 6px, rgba(255,255,255,0.05) 12px)",
   };
 
   if (!hasCard) {
@@ -82,7 +87,7 @@ function PlayingCard({ slot, onClick, disabled }) {
           ...outer,
           background: "rgba(17,24,39,0.04)",
           border: "1px dashed #9ca3af",
-          boxShadow: "none"
+          boxShadow: "none",
         }}
         onClick={disabled ? undefined : onClick}
       >
@@ -97,14 +102,14 @@ function PlayingCard({ slot, onClick, disabled }) {
         <>
           <div style={corner}>
             {rank}
-            <div style={{ fontSize: 14 }}>{rank === "JOKER" ? "🃏" : sym}</div>
+            <div style={{ fontSize: small ? 12 : 14 }}>{rank === "JOKER" ? "🃏" : sym}</div>
           </div>
 
           <div style={pip}>{rank === "JOKER" ? "🃏" : sym}</div>
 
           <div style={corner2}>
             {rank}
-            <div style={{ fontSize: 14 }}>{rank === "JOKER" ? "🃏" : sym}</div>
+            <div style={{ fontSize: small ? 12 : 14 }}>{rank === "JOKER" ? "🃏" : sym}</div>
           </div>
         </>
       ) : (
@@ -115,11 +120,11 @@ function PlayingCard({ slot, onClick, disabled }) {
               position: "absolute",
               bottom: 8,
               left: 10,
-              fontSize: 12,
+              fontSize: small ? 10 : 12,
               opacity: 0.85,
               color: "white",
               fontWeight: 900,
-              letterSpacing: 1
+              letterSpacing: 1,
             }}
           >
             KARGO
@@ -156,6 +161,11 @@ export default function App() {
     const onUpdate = (r) => {
       setRoom(r);
       setError("");
+      // If round ended and phase returned to lobby, clear drawn/peek locally
+      if (r?.phase !== "playing") {
+        setDrawn(null);
+        setPeekDone(false);
+      }
     };
     const onDrawn = (c) => {
       setDrawn(c);
@@ -182,29 +192,16 @@ export default function App() {
   const me = room?.players?.find((p) => p.id === myId);
   const isHost = room?.hostId === myId;
   const isMyTurn = room?.turnPlayerId === myId;
-  const canStart =
-    !!room &&
-    isHost &&
-    room.phase === "lobby" &&
-    (room.players?.length ?? 0) >= 2;
 
-  useEffect(() => {
-    if (!room) return;
-    if (room.phase !== "playing") {
-      setPeekDone(false);
-      setDrawn(null);
-    }
-  }, [room?.phase]);
+  const canStart =
+    !!room && isHost && room.phase === "lobby" && (room.players?.length ?? 0) >= 2;
 
   if (!SERVER_URL) {
     return (
       <div style={page}>
         <div style={cardWrap}>
           <h2 style={{ marginTop: 0 }}>Missing VITE_SERVER_URL</h2>
-          <div>
-            Set it in Vercel to your Render URL (example:
-            <code> https://kargo-vyo1.onrender.com</code>)
-          </div>
+          <div>Set it in Vercel to your Render URL.</div>
         </div>
       </div>
     );
@@ -215,10 +212,12 @@ export default function App() {
       <div style={header}>
         <div>
           <h1 style={{ margin: 0 }}>KARGO</h1>
+          <div style={{ fontSize: 12, opacity: 0.6 }}>UI v3 (used pile visible + instant round end)</div>
           <div style={{ opacity: 0.75, fontSize: 13 }}>
             {connected ? "connected" : "disconnected"} • Server: {SERVER_URL}
           </div>
         </div>
+
         {room && (
           <button
             style={btnGhost}
@@ -236,6 +235,7 @@ export default function App() {
       {!room ? (
         <div style={cardWrap}>
           <h2 style={{ marginTop: 0 }}>Join your friends</h2>
+
           <div style={row}>
             <label style={label}>Your name</label>
             <input
@@ -265,9 +265,7 @@ export default function App() {
             <button
               style={btn}
               disabled={!name.trim() || !code.trim() || !connected}
-              onClick={() =>
-                socket.emit("room:join", { code: code.trim(), name: name.trim() })
-              }
+              onClick={() => socket.emit("room:join", { code: code.trim(), name: name.trim() })}
             >
               Join room
             </button>
@@ -278,28 +276,28 @@ export default function App() {
       ) : (
         <>
           <div style={cardWrap}>
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                flexWrap: "wrap",
-                gap: 12
-              }}
-            >
+            <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
               <div>
                 <div style={{ opacity: 0.75, fontSize: 13 }}>Room code</div>
-                <div style={{ fontSize: 26, fontWeight: 900, letterSpacing: 2 }}>
-                  {room.code}
-                </div>
+                <div style={{ fontSize: 26, fontWeight: 900, letterSpacing: 2 }}>{room.code}</div>
                 <div style={{ opacity: 0.75, fontSize: 13, marginTop: 6 }}>
                   Phase: <b>{room.phase}</b> • Turn:{" "}
-                  <b>
-                    {room.players.find((p) => p.id === room.turnPlayerId)?.name}
-                  </b>
+                  <b>{room.players.find((p) => p.id === room.turnPlayerId)?.name ?? "—"}</b>
                 </div>
+
+                {room.lastRound && (
+                  <div style={{ marginTop: 10, padding: 10, borderRadius: 12, border: "1px solid #e5e7eb", background: "#f8fafc" }}>
+                    <div style={{ fontWeight: 900 }}>
+                      Last round winner: {room.lastRound.winnerName} (−20)
+                    </div>
+                    <div style={{ fontSize: 12, opacity: 0.7 }}>
+                      Round ended instantly when winner hit 0 cards.
+                    </div>
+                  </div>
+                )}
               </div>
 
-              <div style={{ minWidth: 240 }}>
+              <div style={{ minWidth: 260 }}>
                 <div style={{ opacity: 0.75, fontSize: 13 }}>Scoreboard</div>
                 <div style={{ display: "grid", gap: 6, marginTop: 6 }}>
                   {room.scoreboard
@@ -338,34 +336,43 @@ export default function App() {
           {room.phase === "playing" && (
             <>
               <div style={cardWrap}>
-                <h3 style={{ marginTop: 0 }}>Center</h3>
+                <h3 style={{ marginTop: 0 }}>Center (Used Cards)</h3>
 
-                <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
+                <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
                   <div>
                     <div style={{ opacity: 0.75, fontSize: 13, marginBottom: 6 }}>
-                      Thrown card (claim race)
+                      Active used card (race claim)
                     </div>
+                    <PlayingCard
+                      slot={room.thrownCard ? { faceUp: true, card: room.thrownCard } : null}
+                      disabled={true}
+                    />
+                    <div style={{ maxWidth: 280, fontSize: 12, opacity: 0.75, lineHeight: 1.35, marginTop: 8 }}>
+                      Claim by clicking a card in your hand that matches the rank.
+                      Wrong claim = +1 penalty card, and the used card stays.
+                    </div>
+                  </div>
 
-                    <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                      <PlayingCard
-                        slot={
-                          room.thrownCard
-                            ? { faceUp: true, card: room.thrownCard }
-                            : null
-                        }
-                        disabled={true}
-                      />
-                      <div style={{ maxWidth: 260, fontSize: 12, opacity: 0.75, lineHeight: 1.35 }}>
-                        If you click the wrong rank, you get a penalty card, and the thrown card stays.
-                        First correct claim wins; within +0.2s after winner = penalty.
-                      </div>
+                  <div style={{ flex: 1, minWidth: 360 }}>
+                    <div style={{ opacity: 0.75, fontSize: 13, marginBottom: 6 }}>
+                      Used pile (always visible)
+                    </div>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      {(room.usedPilePreview || []).length === 0 ? (
+                        <div style={{ fontSize: 12, opacity: 0.6 }}>No used cards yet.</div>
+                      ) : (
+                        room.usedPilePreview.map((c) => (
+                          <PlayingCard key={c.id} slot={{ faceUp: true, card: c }} disabled={true} small />
+                        ))
+                      )}
+                    </div>
+                    <div style={{ fontSize: 12, opacity: 0.6, marginTop: 8 }}>
+                      When the deck runs out, the used pile reshuffles automatically.
                     </div>
                   </div>
 
                   <div style={{ flex: 1, minWidth: 340 }}>
-                    <div style={{ opacity: 0.75, fontSize: 13, marginBottom: 6 }}>
-                      Your turn actions
-                    </div>
+                    <div style={{ opacity: 0.75, fontSize: 13, marginBottom: 6 }}>Your turn actions</div>
 
                     <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                       <button
@@ -384,7 +391,7 @@ export default function App() {
                           setDrawn(null);
                         }}
                       >
-                        Throw face-up
+                        Don’t keep (make used)
                       </button>
 
                       <button
@@ -405,13 +412,25 @@ export default function App() {
                       </button>
                     </div>
 
+                    {!peekDone && (
+                      <div style={{ marginTop: 10, padding: 12, border: "1px dashed #9ca3af", borderRadius: 12 }}>
+                        <div style={{ fontWeight: 900 }}>Peek once</div>
+                        <div style={{ fontSize: 13, opacity: 0.75, marginTop: 6 }}>
+                          Your bottom 2 are visible now. Click done to hide them.
+                        </div>
+                        <button style={{ ...btn, marginTop: 10 }} onClick={() => setPeekDone(true)}>
+                          Done
+                        </button>
+                      </div>
+                    )}
+
                     {drawn && (
-                      <div style={{ marginTop: 10, padding: 10, border: "1px solid #e5e7eb", borderRadius: 12 }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <div style={{ marginTop: 10, padding: 12, border: "1px solid #e5e7eb", borderRadius: 12 }}>
+                        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
                           <div style={{ fontWeight: 900 }}>Drawn:</div>
                           <PlayingCard slot={{ faceUp: true, card: drawn }} disabled={true} />
                           <div style={{ fontSize: 12, opacity: 0.7 }}>
-                            To “discard drawn + match”, click a matching slot in your hand below.
+                            To “discard drawn + match”, click a matching card slot in your hand below.
                           </div>
                         </div>
 
@@ -421,10 +440,7 @@ export default function App() {
                               key={i}
                               style={btn}
                               onClick={() => {
-                                socket.emit("turn:keepSwap", {
-                                  code: room.code,
-                                  slotIndex: i
-                                });
+                                socket.emit("turn:keepSwap", { code: room.code, slotIndex: i });
                                 setDrawn(null);
                               }}
                             >
@@ -435,18 +451,6 @@ export default function App() {
                       </div>
                     )}
                   </div>
-
-                  {!peekDone && (
-                    <div style={{ padding: 12, border: "1px dashed #9ca3af", borderRadius: 12 }}>
-                      <div style={{ fontWeight: 900 }}>Peek once</div>
-                      <div style={{ fontSize: 13, opacity: 0.75, marginTop: 6 }}>
-                        Your bottom 2 are visible now. Click done to hide them.
-                      </div>
-                      <button style={{ ...btn, marginTop: 10 }} onClick={() => setPeekDone(true)}>
-                        Done
-                      </button>
-                    </div>
-                  )}
                 </div>
               </div>
 
@@ -457,7 +461,7 @@ export default function App() {
                     {drawn
                       ? "(click a slot to discard drawn + match)"
                       : room.thrownCard
-                      ? "(click a slot to claim thrown card)"
+                      ? "(click a slot to claim active used card)"
                       : ""}
                   </span>
                 </h3>
@@ -471,40 +475,32 @@ export default function App() {
                       : slot;
 
                     const clickableForDiscardDrawn = !!drawn && isMyTurn;
-                    const clickableForClaimThrown = !!room.thrownCard;
+                    const clickableForClaimUsed = !!room.thrownCard;
 
                     return (
                       <div key={i} style={{ textAlign: "center" }}>
                         <PlayingCard
                           slot={displaySlot}
-                          disabled={!(clickableForDiscardDrawn || clickableForClaimThrown)}
+                          disabled={!(clickableForDiscardDrawn || clickableForClaimUsed)}
                           onClick={() => {
                             if (clickableForDiscardDrawn) {
-                              socket.emit("turn:discardDrawnMatch", {
-                                code: room.code,
-                                slotIndex: i
-                              });
+                              socket.emit("turn:discardDrawnMatch", { code: room.code, slotIndex: i });
                               setDrawn(null);
                               return;
                             }
-                            if (clickableForClaimThrown) {
-                              socket.emit("thrown:claim", {
-                                code: room.code,
-                                slotIndex: i
-                              });
+                            if (clickableForClaimUsed) {
+                              socket.emit("thrown:claim", { code: room.code, slotIndex: i });
                             }
                           }}
                         />
-                        <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>
-                          slot {i}
-                        </div>
+                        <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>slot {i}</div>
                       </div>
                     );
                   })}
                 </div>
 
                 <div style={{ marginTop: 12, opacity: 0.75, fontSize: 13 }}>
-                  Penalties add cards to the end of your hand (unseen). Win condition: get to 0 cards.
+                  Win condition: hit 0 cards. The round ends instantly and scores apply.
                 </div>
               </div>
             </>
@@ -539,13 +535,13 @@ function dot(color) {
 
 const page = {
   fontFamily: "system-ui, -apple-system, Segoe UI, Roboto",
-  maxWidth: 1100,
+  maxWidth: 1200,
   margin: "0 auto",
   padding: 18,
   display: "grid",
   gap: 12,
   background: "#f8fafc",
-  minHeight: "100vh"
+  minHeight: "100vh",
 };
 
 const header = {
@@ -553,14 +549,14 @@ const header = {
   justifyContent: "space-between",
   alignItems: "center",
   flexWrap: "wrap",
-  gap: 12
+  gap: 12,
 };
 
 const cardWrap = {
   border: "1px solid #e5e7eb",
   borderRadius: 16,
   padding: 16,
-  background: "white"
+  background: "white",
 };
 
 const row = { display: "grid", gap: 6 };
@@ -571,7 +567,7 @@ const input = {
   borderRadius: 12,
   border: "1px solid #d1d5db",
   width: 260,
-  outline: "none"
+  outline: "none",
 };
 
 const btn = {
@@ -581,7 +577,7 @@ const btn = {
   background: "#111827",
   color: "white",
   cursor: "pointer",
-  fontWeight: 800
+  fontWeight: 800,
 };
 
 const btnGhost = {
@@ -590,7 +586,7 @@ const btnGhost = {
   border: "1px solid #d1d5db",
   background: "white",
   cursor: "pointer",
-  fontWeight: 800
+  fontWeight: 800,
 };
 
 const errorBox = {
@@ -600,7 +596,7 @@ const errorBox = {
   border: "1px solid #fecaca",
   background: "#fff1f2",
   color: "#9f1239",
-  fontSize: 13
+  fontSize: 13,
 };
 
 const playerRow = {
@@ -609,7 +605,7 @@ const playerRow = {
   alignItems: "center",
   padding: "10px 12px",
   borderRadius: 12,
-  border: "1px solid #e5e7eb"
+  border: "1px solid #e5e7eb",
 };
 
 const scoreRow = {
@@ -617,7 +613,7 @@ const scoreRow = {
   justifyContent: "space-between",
   padding: "8px 10px",
   borderRadius: 12,
-  border: "1px solid #e5e7eb"
+  border: "1px solid #e5e7eb",
 };
 
 const pill = {
@@ -627,7 +623,7 @@ const pill = {
   background: "#eef2ff",
   border: "1px solid #c7d2fe",
   color: "#3730a3",
-  fontWeight: 900
+  fontWeight: 900,
 };
 
 const pill2 = {
@@ -637,5 +633,5 @@ const pill2 = {
   background: "#ecfeff",
   border: "1px solid #a5f3fc",
   color: "#155e75",
-  fontWeight: 900
+  fontWeight: 900,
 };
