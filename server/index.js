@@ -26,7 +26,7 @@ function cardValue(card) {
   if (/^\d+$/.test(card.rank)) return Number(card.rank);
   if (card.rank === "J") return 11;
   if (card.rank === "Q") return 12;
-  if (card.rank === "K") return isRedSuit(card.suit) ? -1 : 13; // red K = -1, black K = 13
+  if (card.rank === "K") return isRedSuit(card.suit) ? -1 : 13;
   return 0;
 }
 
@@ -95,59 +95,188 @@ function canSeenPairDiscard(room, pid) {
   return a.rank === b.rank;
 }
 
-function endRoundAndScore(room, winnerPid, reason = "out") {
-  // winner gets -20, everyone else gets sum of their card values
-  const winnerName = room.players.get(winnerPid)?.name ?? "Unknown";
+/** -------------------- Used window logic --------------------
+ * usedWindow can be in two states:
+ * - state="open": claimable by matching rank
+ * - state="postWin": not claimable, but within 200ms still penalizes fast second-clicks
+ *
+ * IMPORTANT FIX for “3x 7s” bug:
+ * - The usedWindow card is added to usedPile ONLY ONCE.
+ * - After the first correct claim, we mark state="postWin" and DO NOT re-add on expiry.
+ */
+function tickUsedWindow(room) {
+  if (!room.usedWindow) return;
 
+  const w = room.usedWindow;
+  const t = nowMs();
+
+  if (w.state === "open") {
+    // auto-expire after 2s -> push card to usedPile
+    if (t - w.openedAt > 2000) {
+      room.usedPile.push(w.card);
+      room.usedWindow = null;
+    }
+    return;
+  }
+
+  if (w.state === "postWin") {
+    // post-win penalty window expires quickly
+    if (t > w.postWinUntil) {
+      room.usedWindow = null;
+    }
+  }
+}
+
+function broadcastRoom(room) {
+  tickUsedWindow(room);
+  for (const pid of room.order) {
+    io.to(pid).emit("room:update", publicRoomView(room, pid));
+  }
+}
+
+/** -------------------- KARGO flow --------------------
+ * room.kargo = null OR
+ * {
+ *   callerId,
+ *   callerName,
+ *   calledAt,
+ *   finalTurns: [playerId1, playerId2, ...]  // everyone except caller, in turn order starting next player
+ *   index: 0,
+ *   brokenByOut: false
+ * }
+ */
+function buildFinalTurns(room, callerId) {
+  const order = room.order;
+  const start = room.turnIndex; // caller is calling on their turn
+  const afterCallerIndex = (start + 1) % order.length;
+
+  const finalTurns = [];
+  for (let i = 0; i < order.length; i++) {
+    const pid = order[(afterCallerIndex + i) % order.length];
+    if (pid !== callerId) finalTurns.push(pid);
+  }
+  return finalTurns;
+}
+
+function endRoundAndScore_Standard(room, winnerPid, reason = "out") {
+  const winnerName = room.players.get(winnerPid)?.name ?? "Unknown";
   for (const pid of room.order) {
     const name = room.players.get(pid)?.name ?? "Unknown";
     const prev = room.scoreboard.get(name) ?? 0;
 
-    if (pid === winnerPid) {
-      room.scoreboard.set(name, prev - 20);
-    } else {
-      const total = handTotal(room.hands.get(pid) || []);
-      room.scoreboard.set(name, prev + total);
+    if (pid === winnerPid) room.scoreboard.set(name, prev - 20);
+    else room.scoreboard.set(name, prev + handTotal(room.hands.get(pid) || []));
+  }
+
+  room.lastRound = { winnerPid, winnerName, reason, endedAt: nowMs() };
+  resetToLobby(room);
+}
+
+function endRoundAndScore_KargoCompare(room) {
+  const k = room.kargo;
+  if (!k) return;
+
+  const callerId = k.callerId;
+  const callerName = room.players.get(callerId)?.name ?? k.callerName ?? "Caller";
+
+  const callerTotal = handTotal(room.hands.get(callerId) || []);
+  const totals = room.order.map((pid) => ({
+    pid,
+    name: room.players.get(pid)?.name ?? "Unknown",
+    total: handTotal(room.hands.get(pid) || []),
+  }));
+
+  // If someone has same OR less than caller -> break kargo compare rule
+  const breakers = totals.filter((x) => x.pid !== callerId && x.total <= callerTotal);
+
+  if (breakers.length > 0) {
+    // caller +40
+    room.scoreboard.set(callerName, (room.scoreboard.get(callerName) ?? 0) + 40);
+
+    // all with <= caller get -10
+    for (const b of breakers) {
+      room.scoreboard.set(b.name, (room.scoreboard.get(b.name) ?? 0) - 10);
     }
+
+    // everyone else gets 0 change
+    room.lastRound = {
+      winnerPid: callerId,
+      winnerName: callerName,
+      reason: "kargo_broken_by_total",
+      endedAt: nowMs(),
+    };
+    resetToLobby(room);
+    return;
+  }
+
+  // caller strictly least -> caller -20, everyone else adds total
+  room.scoreboard.set(callerName, (room.scoreboard.get(callerName) ?? 0) - 20);
+  for (const t of totals) {
+    if (t.pid === callerId) continue;
+    room.scoreboard.set(t.name, (room.scoreboard.get(t.name) ?? 0) + t.total);
   }
 
   room.lastRound = {
-    winnerPid,
-    winnerName,
-    reason,
+    winnerPid: callerId,
+    winnerName: callerName,
+    reason: "kargo_success",
     endedAt: nowMs(),
   };
+  resetToLobby(room);
+}
 
-  // reset to lobby phase; keep scoreboard
+function resetToLobby(room) {
   room.phase = "lobby";
   room.deck = [];
   room.usedPile = [];
-  room.drawnBy = new Map();
   room.usedWindow = null;
+  room.drawnBy = new Map();
   room.turnIndex = 0;
   room.hands = new Map();
   room.turnFlags = new Map();
+  room.kargo = null;
 }
 
-function maybeEndIfOut(room, pid) {
+function maybeEndIfOut(room, pid, outReason = "out") {
   const hand = room.hands.get(pid) || [];
-  if (countCards(hand) === 0) {
-    endRoundAndScore(room, pid, "out");
+  if (countCards(hand) !== 0) return false;
+
+  // If KARGO is active and someone else goes out during final-turn phase -> breaks KARGO
+  if (room.kargo && room.phase === "playing") {
+    // winner gets standard -20 / others totals
+    // plus caller gets +40 (break kargo)
+    const callerId = room.kargo.callerId;
+    const callerName = room.players.get(callerId)?.name ?? room.kargo.callerName ?? "Caller";
+    room.scoreboard.set(callerName, (room.scoreboard.get(callerName) ?? 0) + 40);
+
+    endRoundAndScore_Standard(room, pid, "kargo_broken_by_out");
     return true;
   }
-  return false;
+
+  endRoundAndScore_Standard(room, pid, outReason);
+  return true;
 }
 
+/** -------------------- Room view -------------------- */
 function publicRoomView(room, viewerId) {
-  // Active "used card" window (always visible to everyone)
-  const activeUsedCard = room.usedWindow && !room.usedWindow.resolved ? room.usedWindow.card : null;
+  const activeUsedCard = room.usedWindow?.card ?? null;
 
-  // Used pile preview is ALWAYS visible to everyone
-  const usedPreviewCount = 12;
-  const usedPilePreview = room.usedPile.slice(-usedPreviewCount);
+  // show only the LAST used card (client stacks it)
+  const lastUsed = room.usedPile.length ? room.usedPile[room.usedPile.length - 1] : null;
+  const usedCount = room.usedPile.length;
 
   const viewerFlags = room.turnFlags.get(viewerId) || { keptDrawnThisTurn: false };
   const isMyTurn = room.order[room.turnIndex] === viewerId;
+
+  const k = room.kargo
+    ? {
+        callerId: room.kargo.callerId,
+        callerName: room.kargo.callerName,
+        finalTurns: room.kargo.finalTurns,
+        index: room.kargo.index,
+        activeFinalPlayerId: room.kargo.finalTurns[room.kargo.index] ?? null,
+      }
+    : null;
 
   return {
     code: room.code,
@@ -156,13 +285,14 @@ function publicRoomView(room, viewerId) {
     deckRemaining: room.deck.length,
     turnPlayerId: room.order[room.turnIndex] ?? null,
 
-    // keep legacy key so your existing client doesn’t break
+    // old name kept so your client doesn't break
     thrownCard: activeUsedCard,
 
-    // new: show used pile face-up to everyone
-    usedPilePreview,
+    usedPileTop: lastUsed,
+    usedPileCount: usedCount,
 
     lastRound: room.lastRound ?? null,
+    kargo: k,
 
     viewer: {
       keptDrawnThisTurn: !!viewerFlags.keptDrawnThisTurn,
@@ -174,9 +304,7 @@ function publicRoomView(room, viewerId) {
       const hand = room.hands.get(pid) || [];
       const slots = hand.map((slot) => {
         if (!slot) return null;
-        if (pid === viewerId) {
-          return { faceUp: !!slot.faceUp, card: slot.faceUp ? slot.card : null };
-        }
+        if (pid === viewerId) return { faceUp: !!slot.faceUp, card: slot.faceUp ? slot.card : null };
         return { faceUp: false, card: null };
       });
       return { id: pid, name, cardCount: countCards(hand), slots };
@@ -186,21 +314,7 @@ function publicRoomView(room, viewerId) {
   };
 }
 
-function broadcastRoom(room) {
-  // used-window expiry: after 2s, push card to usedPile (still visible there)
-  if (room.usedWindow && !room.usedWindow.resolved) {
-    const age = nowMs() - room.usedWindow.openedAt;
-    if (age > 2000) {
-      room.usedPile.push(room.usedWindow.card);
-      room.usedWindow.resolved = true;
-    }
-  }
-
-  for (const pid of room.order) {
-    io.to(pid).emit("room:update", publicRoomView(room, pid));
-  }
-}
-
+/** -------------------- Start round -------------------- */
 function startRound(room) {
   const n = room.order.length;
   room.deckCount = n <= 5 ? 2 : 3;
@@ -215,6 +329,7 @@ function startRound(room) {
 
   room.phase = "playing";
   room.turnIndex = 0;
+  room.kargo = null;
 
   for (const pid of room.order) {
     room.turnFlags.set(pid, { keptDrawnThisTurn: false });
@@ -236,6 +351,24 @@ function startRound(room) {
 }
 
 function nextTurn(room) {
+  // If KARGO is active, final turns control whose turn is next
+  if (room.kargo) {
+    // move to next final player
+    room.kargo.index += 1;
+
+    // if finals exhausted -> evaluate totals vs caller
+    if (room.kargo.index >= room.kargo.finalTurns.length) {
+      endRoundAndScore_KargoCompare(room);
+      return;
+    }
+
+    // set turnIndex to that player in order
+    const nextPid = room.kargo.finalTurns[room.kargo.index];
+    room.turnIndex = room.order.indexOf(nextPid);
+    startTurn(room, nextPid);
+    return;
+  }
+
   room.turnIndex = (room.turnIndex + 1) % room.order.length;
   startTurn(room, room.order[room.turnIndex]);
 }
@@ -245,7 +378,7 @@ function givePenaltyCard(room, pid) {
   const c = room.deck.pop();
   if (!c) return;
   const hand = room.hands.get(pid) || [];
-  hand.push({ card: c, faceUp: false });
+  hand.push({ card: c, faceUp: false }); // unseen penalty card
   room.hands.set(pid, hand);
 }
 
@@ -272,10 +405,10 @@ io.on("connection", (socket) => {
       turnFlags: new Map(),
 
       lastRound: null,
+      kargo: null,
     };
 
     rooms.set(code, room);
-
     room.players.set(socket.id, { id: socket.id, name });
     room.order.push(socket.id);
     room.scoreboard.set(name, 0);
@@ -327,10 +460,42 @@ io.on("connection", (socket) => {
     broadcastRoom(room);
   });
 
-  socket.on("turn:draw", ({ code }) => {
+  /** ----------- CALL KARGO (only on your turn, with no pending drawn card) ----------- */
+  socket.on("kargo:call", ({ code }) => {
     const room = rooms.get(code);
     if (!room || room.phase !== "playing") return;
     if (room.order[room.turnIndex] !== socket.id) return socket.emit("error:msg", "Not your turn");
+    if (room.drawnBy.has(socket.id)) return socket.emit("error:msg", "Resolve your drawn card first");
+    if (room.kargo) return socket.emit("error:msg", "KARGO already called");
+
+    const callerName = room.players.get(socket.id)?.name ?? "Caller";
+
+    room.kargo = {
+      callerId: socket.id,
+      callerName,
+      calledAt: nowMs(),
+      finalTurns: buildFinalTurns(room, socket.id),
+      index: -1, // nextTurn() will move to 0
+    };
+
+    // move to the first final player immediately
+    nextTurn(room);
+    broadcastRoom(room);
+  });
+
+  /** ----------- DRAW ----------- */
+  socket.on("turn:draw", ({ code }) => {
+    const room = rooms.get(code);
+    if (!room || room.phase !== "playing") return;
+
+    // When KARGO active, only the active final player can act
+    if (room.kargo) {
+      const activeFinal = room.kargo.finalTurns[room.kargo.index] ?? null;
+      if (activeFinal !== socket.id) return socket.emit("error:msg", "Not your final turn");
+    } else {
+      if (room.order[room.turnIndex] !== socket.id) return socket.emit("error:msg", "Not your turn");
+    }
+
     if (room.drawnBy.has(socket.id)) return socket.emit("error:msg", "You already drew");
 
     ensureDeck(room);
@@ -342,16 +507,17 @@ io.on("connection", (socket) => {
     broadcastRoom(room);
   });
 
-  /**
-   * KEEP -> SLOT:
-   * drawn goes into slot,
-   * replaced slot card becomes ACTIVE usedWindow (claimable),
-   * usedWindow persists even after turn end / turn change.
-   */
+  /** ----------- KEEP -> SLOT (RULE: cannot keep into EMPTY slot) ----------- */
   socket.on("turn:keepSwap", ({ code, slotIndex }) => {
     const room = rooms.get(code);
     if (!room || room.phase !== "playing") return;
-    if (room.order[room.turnIndex] !== socket.id) return socket.emit("error:msg", "Not your turn");
+
+    if (room.kargo) {
+      const activeFinal = room.kargo.finalTurns[room.kargo.index] ?? null;
+      if (activeFinal !== socket.id) return socket.emit("error:msg", "Not your final turn");
+    } else {
+      if (room.order[room.turnIndex] !== socket.id) return socket.emit("error:msg", "Not your turn");
+    }
 
     const drawn = room.drawnBy.get(socket.id);
     if (!drawn) return socket.emit("error:msg", "Draw first");
@@ -360,67 +526,125 @@ io.on("connection", (socket) => {
     if (!hand) return;
 
     const replaced = hand[slotIndex];
+    if (!replaced) return socket.emit("error:msg", "Cannot keep into an empty slot");
 
+    // swap
     hand[slotIndex] = { card: drawn, faceUp: true };
     room.drawnBy.delete(socket.id);
-
     room.turnFlags.set(socket.id, { keptDrawnThisTurn: true });
 
-    if (replaced) {
-      if (room.usedWindow && !room.usedWindow.resolved) {
-        room.usedPile.push(replaced.card);
-      } else {
-        room.usedWindow = {
-          card: replaced.card,
-          openedAt: nowMs(),
-          byId: socket.id,
-          winner: null,
-          resolved: false,
-        };
-      }
+    // replaced becomes usedWindow (or goes to usedPile if window already open)
+    if (room.usedWindow) {
+      room.usedPile.push(replaced.card);
+    } else {
+      room.usedWindow = { card: replaced.card, state: "open", openedAt: nowMs() };
     }
 
-    // If player somehow hits 0, end instantly
-    if (maybeEndIfOut(room, socket.id)) return broadcastRoom(room);
-
-    // keep does NOT auto-end; player can discard seen pair or end turn
+    if (maybeEndIfOut(room, socket.id, "out")) return broadcastRoom(room);
     broadcastRoom(room);
   });
 
-  // discard drawn + matching rank (any slot) -> both go to usedPile, ends turn
+  /** ----------- DISCARD DRAWN + MATCH SLOT (slot can be faceUp or faceDown) ----------- */
   socket.on("turn:discardDrawnMatch", ({ code, slotIndex }) => {
     const room = rooms.get(code);
     if (!room || room.phase !== "playing") return;
-    if (room.order[room.turnIndex] !== socket.id) return socket.emit("error:msg", "Not your turn");
+
+    if (room.kargo) {
+      const activeFinal = room.kargo.finalTurns[room.kargo.index] ?? null;
+      if (activeFinal !== socket.id) return socket.emit("error:msg", "Not your final turn");
+    } else {
+      if (room.order[room.turnIndex] !== socket.id) return socket.emit("error:msg", "Not your turn");
+    }
 
     const drawn = room.drawnBy.get(socket.id);
     if (!drawn) return socket.emit("error:msg", "Draw first");
 
     const hand = room.hands.get(socket.id);
     const slot = hand?.[slotIndex];
-    if (!slot) return socket.emit("error:msg", "Invalid slot");
+    if (!slot) return socket.emit("error:msg", "Empty slot");
 
     if (slot.card.rank !== drawn.rank) {
-      return socket.emit("error:msg", "That slot does not match the drawn rank");
+      return socket.emit("error:msg", "Selected slot does not match the drawn rank");
     }
 
+    // discard both
     room.usedPile.push(drawn);
     room.usedPile.push(slot.card);
 
     hand[slotIndex] = null;
     room.drawnBy.delete(socket.id);
 
-    if (maybeEndIfOut(room, socket.id)) return broadcastRoom(room);
+    if (maybeEndIfOut(room, socket.id, "out")) return broadcastRoom(room);
 
+    // end turn
     nextTurn(room);
     broadcastRoom(room);
   });
 
-  // discard seen pair (slots 0 & 1) AFTER keeping this turn -> ends turn
+  /** ----------- NEW: TAP UNSEEN SLOT while holding drawn card ----------- */
+  socket.on("turn:tryMatchUnseen", ({ code, slotIndex }) => {
+    const room = rooms.get(code);
+    if (!room || room.phase !== "playing") return;
+
+    if (room.kargo) {
+      const activeFinal = room.kargo.finalTurns[room.kargo.index] ?? null;
+      if (activeFinal !== socket.id) return socket.emit("error:msg", "Not your final turn");
+    } else {
+      if (room.order[room.turnIndex] !== socket.id) return socket.emit("error:msg", "Not your turn");
+    }
+
+    const drawn = room.drawnBy.get(socket.id);
+    if (!drawn) return socket.emit("error:msg", "Draw first");
+
+    const hand = room.hands.get(socket.id);
+    const slot = hand?.[slotIndex];
+    if (!slot) return socket.emit("error:msg", "Empty slot");
+
+    if (slot.faceUp) return socket.emit("error:msg", "That slot is not unseen");
+
+    // reveal it (it becomes seen after this attempt)
+    slot.faceUp = true;
+
+    if (slot.card.rank === drawn.rank) {
+      // match -> discard both
+      room.usedPile.push(drawn);
+      room.usedPile.push(slot.card);
+      hand[slotIndex] = null;
+      room.drawnBy.delete(socket.id);
+
+      if (maybeEndIfOut(room, socket.id, "out")) return broadcastRoom(room);
+      nextTurn(room);
+      broadcastRoom(room);
+      return;
+    }
+
+    // mismatch -> keep unseen card (now seen), penalty +1 unseen card,
+    // and drawn becomes active used card (since you didn't keep it)
+    givePenaltyCard(room, socket.id);
+
+    room.drawnBy.delete(socket.id);
+    if (room.usedWindow) {
+      room.usedPile.push(drawn);
+    } else {
+      room.usedWindow = { card: drawn, state: "open", openedAt: nowMs() };
+    }
+
+    // end turn
+    nextTurn(room);
+    broadcastRoom(room);
+  });
+
+  /** ----------- DISCARD SEEN PAIR (slots 0 & 1) AFTER KEEP THIS TURN ----------- */
   socket.on("turn:discardSeenPair", ({ code }) => {
     const room = rooms.get(code);
     if (!room || room.phase !== "playing") return;
-    if (room.order[room.turnIndex] !== socket.id) return socket.emit("error:msg", "Not your turn");
+
+    if (room.kargo) {
+      const activeFinal = room.kargo.finalTurns[room.kargo.index] ?? null;
+      if (activeFinal !== socket.id) return socket.emit("error:msg", "Not your final turn");
+    } else {
+      if (room.order[room.turnIndex] !== socket.id) return socket.emit("error:msg", "Not your turn");
+    }
 
     const flags = room.turnFlags.get(socket.id) || { keptDrawnThisTurn: false };
     if (!flags.keptDrawnThisTurn) {
@@ -438,103 +662,120 @@ io.on("connection", (socket) => {
     hand[0] = null;
     hand[1] = null;
 
-    if (maybeEndIfOut(room, socket.id)) return broadcastRoom(room);
+    if (maybeEndIfOut(room, socket.id, "out")) return broadcastRoom(room);
 
     nextTurn(room);
     broadcastRoom(room);
   });
 
-  // end turn (used card stays visible/claimable; we do NOT resolve it)
+  /** ----------- END TURN (does not hide used card) ----------- */
   socket.on("turn:end", ({ code }) => {
     const room = rooms.get(code);
     if (!room || room.phase !== "playing") return;
-    if (room.order[room.turnIndex] !== socket.id) return socket.emit("error:msg", "Not your turn");
+
+    if (room.kargo) {
+      const activeFinal = room.kargo.finalTurns[room.kargo.index] ?? null;
+      if (activeFinal !== socket.id) return socket.emit("error:msg", "Not your final turn");
+    } else {
+      if (room.order[room.turnIndex] !== socket.id) return socket.emit("error:msg", "Not your turn");
+    }
+
     if (room.drawnBy.has(socket.id)) return socket.emit("error:msg", "Resolve your drawn card first");
 
     nextTurn(room);
     broadcastRoom(room);
   });
 
-  // throw drawn (don’t keep): drawn becomes usedWindow (if one active, goes to usedPile). ends turn
+  /** ----------- DON'T KEEP (throw drawn -> usedWindow) ----------- */
   socket.on("turn:throwDrawn", ({ code }) => {
     const room = rooms.get(code);
     if (!room || room.phase !== "playing") return;
-    if (room.order[room.turnIndex] !== socket.id) return socket.emit("error:msg", "Not your turn");
+
+    if (room.kargo) {
+      const activeFinal = room.kargo.finalTurns[room.kargo.index] ?? null;
+      if (activeFinal !== socket.id) return socket.emit("error:msg", "Not your final turn");
+    } else {
+      if (room.order[room.turnIndex] !== socket.id) return socket.emit("error:msg", "Not your turn");
+    }
 
     const drawn = room.drawnBy.get(socket.id);
     if (!drawn) return socket.emit("error:msg", "Draw first");
 
     room.drawnBy.delete(socket.id);
 
-    if (room.usedWindow && !room.usedWindow.resolved) {
-      room.usedPile.push(drawn);
-    } else {
-      room.usedWindow = {
-        card: drawn,
-        openedAt: nowMs(),
-        byId: socket.id,
-        winner: null,
-        resolved: false,
-      };
-    }
+    if (room.usedWindow) room.usedPile.push(drawn);
+    else room.usedWindow = { card: drawn, state: "open", openedAt: nowMs() };
 
     nextTurn(room);
     broadcastRoom(room);
   });
 
-  /**
-   * CLAIM usedWindow card:
-   * - wrong rank: penalty +1 from deck, usedWindow stays active
-   * - first correct: claimant discards their matching card + usedWindow card to usedPile
-   * - second correct within +0.2s: penalty
-   * - if claimant hits 0 at any time: round ends instantly
-   */
+  /** ----------- CLAIM USED CARD (race claim + second-touch penalty) ----------- */
   socket.on("thrown:claim", ({ code, slotIndex }) => {
     const room = rooms.get(code);
     if (!room || room.phase !== "playing") return;
 
-    const used = room.usedWindow;
-    if (!used || used.resolved) return socket.emit("error:msg", "No active used card");
+    const w = room.usedWindow;
+    if (!w) return socket.emit("error:msg", "No active used card");
+
+    // In postWin state: only penalize within window; no discards.
+    if (w.state === "postWin") {
+      if (nowMs() <= w.postWinUntil) {
+        // penalty if they try to touch during post-win window
+        givePenaltyCard(room, socket.id);
+      }
+      broadcastRoom(room);
+      return;
+    }
 
     const hand = room.hands.get(socket.id);
     const slot = hand?.[slotIndex];
-    if (!slot) return socket.emit("error:msg", "Invalid slot");
+    if (!slot) return socket.emit("error:msg", "Empty slot");
 
-    const tNow = nowMs();
-    const matches = slot.card.rank === used.card.rank;
-
-    if (!matches) {
-      // penalty card from unused deck; used card remains visible & claimable
+    // must match rank
+    if (slot.card.rank !== w.card.rank) {
       givePenaltyCard(room, socket.id);
       broadcastRoom(room);
       return;
     }
 
-    if (!used.winner) {
-      used.winner = { id: socket.id, at: tNow };
+    // FIRST correct claim:
+    // discard their selected card + used card to usedPile ONCE
+    room.usedPile.push(slot.card);
+    hand[slotIndex] = null;
 
-      room.usedPile.push(slot.card);
-      hand[slotIndex] = null;
+    room.usedPile.push(w.card);
 
-      room.usedPile.push(used.card);
+    // IMPORTANT: switch to postWin so we DO NOT add w.card again later
+    room.usedWindow = {
+      state: "postWin",
+      postWinUntil: nowMs() + 200,
+    };
 
-      // If this makes them out -> END IMMEDIATELY (even if not their turn)
-      if (maybeEndIfOut(room, socket.id)) return broadcastRoom(room);
-
-      // Keep window around briefly for “second touch” penalty window.
-      // We DO NOT hide it on turn end; it will auto-expire and get pushed to usedPile anyway.
-      broadcastRoom(room);
-      return;
-    }
-
-    const diff = tNow - used.winner.at;
-    if (socket.id !== used.winner.id && diff <= 200) {
-      givePenaltyCard(room, socket.id);
-      broadcastRoom(room);
-      return;
-    }
-
+    if (maybeEndIfOut(room, socket.id, "out")) return broadcastRoom(room);
     broadcastRoom(room);
+  });
+
+  /** ----------- POWER (basic): 7/8 peek own slot; 9/10 peek other's slot ----------- */
+  socket.on("power:peekSelf", ({ code, mySlotIndex }) => {
+    const room = rooms.get(code);
+    if (!room || room.phase !== "playing") return;
+
+    const hand = room.hands.get(socket.id) || [];
+    const slot = hand[mySlotIndex];
+    if (!slot) return socket.emit("error:msg", "Empty slot");
+    // reveal only to player (server tells client)
+    socket.emit("power:result", { type: "peekSelf", slotIndex: mySlotIndex, card: slot.card });
+  });
+
+  socket.on("power:peekOther", ({ code, otherPlayerId, otherSlotIndex }) => {
+    const room = rooms.get(code);
+    if (!room || room.phase !== "playing") return;
+
+    const otherHand = room.hands.get(otherPlayerId) || [];
+    const otherSlot = otherHand[otherSlotIndex];
+    if (!otherSlot) return socket.emit("error:msg", "Other slot empty");
+    socket.emit("power:result", { type: "peekOther", otherPlayerId, slotIndex: otherSlotIndex, card: otherSlot.card });
   });
 
   socket.on("disconnect", () => {
