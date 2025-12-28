@@ -664,6 +664,14 @@ function AppInner() {
 
                     <button
                       style={btnGhost}
+                      disabled={!amIAllowedToAct || !drawn || turnStage !== "hasDrawn" || powerMode === "none"}
+                      onClick={() => socket.emit("power:cancel", { code: room.code })}
+                    >
+                      Cancel Power
+                    </button>
+
+                    <button
+                      style={btnGhost}
                       disabled={!canCallKargo}
                       onClick={() => socket.emit("kargo:call", { code: room.code })}
                       title="You can call Kargo any time during YOUR turn until the next player draws"
