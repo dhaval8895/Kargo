@@ -15,6 +15,35 @@ const io = new Server(server, { cors: { origin: "*" } });
 const SUITS = ["S", "H", "D", "C"];
 const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
 
+function isRedSuit(s) {
+  return s === "H" || s === "D";
+}
+
+function cardValue(card) {
+  if (!card) return 0;
+  if (card.rank === "JOKER") return 0;
+  if (card.rank === "A") return 1;
+  if (/^\d+$/.test(card.rank)) return Number(card.rank);
+  if (card.rank === "J") return 11;
+  if (card.rank === "Q") return 12;
+  if (card.rank === "K") return isRedSuit(card.suit) ? -1 : 13; // red K = -1, black K = 13
+  return 0;
+}
+
+function handTotal(hand) {
+  return (hand || [])
+    .filter(Boolean)
+    .reduce((sum, slot) => sum + cardValue(slot.card), 0);
+}
+
+function countCards(hand) {
+  return (hand || []).filter(Boolean).length;
+}
+
+function nowMs() {
+  return Date.now();
+}
+
 function shuffle(arr) {
   const a = [...arr];
   for (let i = a.length - 1; i > 0; i--) {
@@ -39,17 +68,9 @@ function makeDecks(deckCount) {
 
 function ensureDeck(room) {
   if (room.deck.length > 0) return;
-  if (room.usedPile.length === 0) return; // reshuffle used pile into deck
+  if (room.usedPile.length === 0) return;
   room.deck = shuffle(room.usedPile);
   room.usedPile = [];
-}
-
-function nowMs() {
-  return Date.now();
-}
-
-function countCards(hand) {
-  return (hand || []).filter(Boolean).length;
 }
 
 /** -------------------- Rooms -------------------- */
@@ -74,8 +95,56 @@ function canSeenPairDiscard(room, pid) {
   return a.rank === b.rank;
 }
 
+function endRoundAndScore(room, winnerPid, reason = "out") {
+  // winner gets -20, everyone else gets sum of their card values
+  const winnerName = room.players.get(winnerPid)?.name ?? "Unknown";
+
+  for (const pid of room.order) {
+    const name = room.players.get(pid)?.name ?? "Unknown";
+    const prev = room.scoreboard.get(name) ?? 0;
+
+    if (pid === winnerPid) {
+      room.scoreboard.set(name, prev - 20);
+    } else {
+      const total = handTotal(room.hands.get(pid) || []);
+      room.scoreboard.set(name, prev + total);
+    }
+  }
+
+  room.lastRound = {
+    winnerPid,
+    winnerName,
+    reason,
+    endedAt: nowMs(),
+  };
+
+  // reset to lobby phase; keep scoreboard
+  room.phase = "lobby";
+  room.deck = [];
+  room.usedPile = [];
+  room.drawnBy = new Map();
+  room.usedWindow = null;
+  room.turnIndex = 0;
+  room.hands = new Map();
+  room.turnFlags = new Map();
+}
+
+function maybeEndIfOut(room, pid) {
+  const hand = room.hands.get(pid) || [];
+  if (countCards(hand) === 0) {
+    endRoundAndScore(room, pid, "out");
+    return true;
+  }
+  return false;
+}
+
 function publicRoomView(room, viewerId) {
+  // Active "used card" window (always visible to everyone)
   const activeUsedCard = room.usedWindow && !room.usedWindow.resolved ? room.usedWindow.card : null;
+
+  // Used pile preview is ALWAYS visible to everyone
+  const usedPreviewCount = 12;
+  const usedPilePreview = room.usedPile.slice(-usedPreviewCount);
 
   const viewerFlags = room.turnFlags.get(viewerId) || { keptDrawnThisTurn: false };
   const isMyTurn = room.order[room.turnIndex] === viewerId;
@@ -87,8 +156,13 @@ function publicRoomView(room, viewerId) {
     deckRemaining: room.deck.length,
     turnPlayerId: room.order[room.turnIndex] ?? null,
 
-    // keeping old key name so frontend doesn't break (you can rename later)
+    // keep legacy key so your existing client doesn’t break
     thrownCard: activeUsedCard,
+
+    // new: show used pile face-up to everyone
+    usedPilePreview,
+
+    lastRound: room.lastRound ?? null,
 
     viewer: {
       keptDrawnThisTurn: !!viewerFlags.keptDrawnThisTurn,
@@ -113,7 +187,7 @@ function publicRoomView(room, viewerId) {
 }
 
 function broadcastRoom(room) {
-  // Used-card claim window expires after 2 seconds -> card becomes used pile
+  // used-window expiry: after 2s, push card to usedPile (still visible there)
   if (room.usedWindow && !room.usedWindow.resolved) {
     const age = nowMs() - room.usedWindow.openedAt;
     if (age > 2000) {
@@ -130,21 +204,21 @@ function broadcastRoom(room) {
 function startRound(room) {
   const n = room.order.length;
   room.deckCount = n <= 5 ? 2 : 3;
+
   room.deck = makeDecks(room.deckCount);
-  room.usedPile = []; // "used cards" pile (was discard)
-
-  room.hands = new Map();
-  room.turnIndex = 0;
-  room.drawnBy = new Map();
-  room.phase = "playing";
-
-  // usedWindow is the active face-up card that players can race-claim
+  room.usedPile = [];
   room.usedWindow = null;
 
+  room.hands = new Map();
+  room.drawnBy = new Map();
   room.turnFlags = new Map();
-  for (const pid of room.order) room.turnFlags.set(pid, { keptDrawnThisTurn: false });
+
+  room.phase = "playing";
+  room.turnIndex = 0;
 
   for (const pid of room.order) {
+    room.turnFlags.set(pid, { keptDrawnThisTurn: false });
+
     const c0 = room.deck.pop();
     const c1 = room.deck.pop();
     const c2 = room.deck.pop();
@@ -190,13 +264,14 @@ io.on("connection", (socket) => {
       deckCount: 2,
       deck: [],
       usedPile: [],
+      usedWindow: null,
 
       hands: new Map(),
       turnIndex: 0,
       drawnBy: new Map(),
-      usedWindow: null,
-
       turnFlags: new Map(),
+
+      lastRound: null,
     };
 
     rooms.set(code, room);
@@ -269,9 +344,9 @@ io.on("connection", (socket) => {
 
   /**
    * KEEP -> SLOT:
-   * - drawn card goes into the chosen slot
-   * - the replaced slotted card becomes the ACTIVE used card (race-claim window)
-   * - if a used card window is already active, replaced card goes to used pile
+   * drawn goes into slot,
+   * replaced slot card becomes ACTIVE usedWindow (claimable),
+   * usedWindow persists even after turn end / turn change.
    */
   socket.on("turn:keepSwap", ({ code, slotIndex }) => {
     const room = rooms.get(code);
@@ -284,37 +359,35 @@ io.on("connection", (socket) => {
     const hand = room.hands.get(socket.id);
     if (!hand) return;
 
-    const replaced = hand[slotIndex]; // card currently in that slot (may be null)
+    const replaced = hand[slotIndex];
 
-    // Put drawn in the slot (kept card becomes faceUp because you saw it)
     hand[slotIndex] = { card: drawn, faceUp: true };
     room.drawnBy.delete(socket.id);
 
-    // Mark you kept a card this turn (enables "discard seen pair" rule, etc.)
     room.turnFlags.set(socket.id, { keptDrawnThisTurn: true });
 
-    // The replaced card becomes the "used card" window (claim race)
     if (replaced) {
       if (room.usedWindow && !room.usedWindow.resolved) {
-        // Can't overwrite an active window -> send replaced to used pile
         room.usedPile.push(replaced.card);
       } else {
         room.usedWindow = {
           card: replaced.card,
           openedAt: nowMs(),
           byId: socket.id,
-          winner: null, // { id, at }
+          winner: null,
           resolved: false,
         };
       }
     }
 
-    // IMPORTANT: keeping does NOT end your turn automatically in this build.
-    // You can discard seen pair (if eligible) or click "End turn".
+    // If player somehow hits 0, end instantly
+    if (maybeEndIfOut(room, socket.id)) return broadcastRoom(room);
+
+    // keep does NOT auto-end; player can discard seen pair or end turn
     broadcastRoom(room);
   });
 
-  // Discard drawn + matching rank in any slot (any suit/color) — ends turn
+  // discard drawn + matching rank (any slot) -> both go to usedPile, ends turn
   socket.on("turn:discardDrawnMatch", ({ code, slotIndex }) => {
     const room = rooms.get(code);
     if (!room || room.phase !== "playing") return;
@@ -331,18 +404,19 @@ io.on("connection", (socket) => {
       return socket.emit("error:msg", "That slot does not match the drawn rank");
     }
 
-    // Both become used cards (go to usedPile)
     room.usedPile.push(drawn);
     room.usedPile.push(slot.card);
 
     hand[slotIndex] = null;
     room.drawnBy.delete(socket.id);
 
+    if (maybeEndIfOut(room, socket.id)) return broadcastRoom(room);
+
     nextTurn(room);
     broadcastRoom(room);
   });
 
-  // Discard seen pair (slots 0 & 1) AFTER keeping this turn — ends turn
+  // discard seen pair (slots 0 & 1) AFTER keeping this turn -> ends turn
   socket.on("turn:discardSeenPair", ({ code }) => {
     const room = rooms.get(code);
     if (!room || room.phase !== "playing") return;
@@ -364,11 +438,13 @@ io.on("connection", (socket) => {
     hand[0] = null;
     hand[1] = null;
 
+    if (maybeEndIfOut(room, socket.id)) return broadcastRoom(room);
+
     nextTurn(room);
     broadcastRoom(room);
   });
 
-  // End turn (only allowed if you don't still have an unresolved drawn card)
+  // end turn (used card stays visible/claimable; we do NOT resolve it)
   socket.on("turn:end", ({ code }) => {
     const room = rooms.get(code);
     if (!room || room.phase !== "playing") return;
@@ -379,11 +455,7 @@ io.on("connection", (socket) => {
     broadcastRoom(room);
   });
 
-  /**
-   * THROW DRAWN (do NOT keep):
-   * - drawn card becomes the active used card window (race-claim window)
-   * - ends turn immediately
-   */
+  // throw drawn (don’t keep): drawn becomes usedWindow (if one active, goes to usedPile). ends turn
   socket.on("turn:throwDrawn", ({ code }) => {
     const room = rooms.get(code);
     if (!room || room.phase !== "playing") return;
@@ -395,14 +467,13 @@ io.on("connection", (socket) => {
     room.drawnBy.delete(socket.id);
 
     if (room.usedWindow && !room.usedWindow.resolved) {
-      // active window exists -> can't overwrite, so just put it into used pile
       room.usedPile.push(drawn);
     } else {
       room.usedWindow = {
         card: drawn,
         openedAt: nowMs(),
         byId: socket.id,
-        winner: null, // { id, at }
+        winner: null,
         resolved: false,
       };
     }
@@ -412,11 +483,11 @@ io.on("connection", (socket) => {
   });
 
   /**
-   * CLAIM USED CARD WINDOW:
-   * - if wrong rank: +1 penalty card from unused deck, used card stays active
-   * - if first correct: claimant discards their matching card (to usedPile),
-   *   used card goes to usedPile, window stays open briefly for +0.2s penalty
-   * - if another correct within +200ms (0.2s): +1 penalty card
+   * CLAIM usedWindow card:
+   * - wrong rank: penalty +1 from deck, usedWindow stays active
+   * - first correct: claimant discards their matching card + usedWindow card to usedPile
+   * - second correct within +0.2s: penalty
+   * - if claimant hits 0 at any time: round ends instantly
    */
   socket.on("thrown:claim", ({ code, slotIndex }) => {
     const room = rooms.get(code);
@@ -433,7 +504,7 @@ io.on("connection", (socket) => {
     const matches = slot.card.rank === used.card.rank;
 
     if (!matches) {
-      // Wrong claim: penalty card from unused deck; used card remains active
+      // penalty card from unused deck; used card remains visible & claimable
       givePenaltyCard(room, socket.id);
       broadcastRoom(room);
       return;
@@ -442,27 +513,27 @@ io.on("connection", (socket) => {
     if (!used.winner) {
       used.winner = { id: socket.id, at: tNow };
 
-      // claimant discards their selected card
       room.usedPile.push(slot.card);
       hand[slotIndex] = null;
 
-      // used card goes to used pile
       room.usedPile.push(used.card);
 
-      // keep window active briefly to catch +0.2s penalties (we do NOT immediately resolve)
+      // If this makes them out -> END IMMEDIATELY (even if not their turn)
+      if (maybeEndIfOut(room, socket.id)) return broadcastRoom(room);
+
+      // Keep window around briefly for “second touch” penalty window.
+      // We DO NOT hide it on turn end; it will auto-expire and get pushed to usedPile anyway.
       broadcastRoom(room);
       return;
     }
 
     const diff = tNow - used.winner.at;
     if (socket.id !== used.winner.id && diff <= 200) {
-      // second touch penalty (within +0.2s of winner)
       givePenaltyCard(room, socket.id);
       broadcastRoom(room);
       return;
     }
 
-    // late correct claim => nothing
     broadcastRoom(room);
   });
 
