@@ -2,711 +2,651 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
 
-const SERVER_URL = import.meta.env.VITE_SERVER_URL;
+const SERVER_URL =
+  import.meta.env.VITE_SERVER_URL ||
+  (location.hostname === "localhost" ? "http://localhost:10000" : "https://kargo-vyo1.onrender.com");
 
-/* ---------- Card helpers ---------- */
-function suitSymbol(suit) {
-  if (suit === "S") return "♠";
-  if (suit === "H") return "♥";
-  if (suit === "D") return "♦";
-  if (suit === "C") return "♣";
-  return "🃏";
-}
-function isRedSuit(suit) {
-  return suit === "H" || suit === "D";
-}
-function CardFace({ card, small }) {
-  const rank = card?.rank ?? "?";
-  const suit = card?.suit ?? "J";
-  const sym = rank === "JOKER" ? "🃏" : suitSymbol(suit);
-  const red = isRedSuit(suit);
-  const W = small ? 56 : 86;
-  const H = small ? 78 : 122;
+const socket = io(SERVER_URL, { transports: ["websocket"] });
 
-  return (
-    <div style={{ width: W, height: H, borderRadius: 14, background: "white", border: "1px solid #111827", boxShadow: "0 6px 16px rgba(0,0,0,0.12)", position: "relative", display: "grid", placeItems: "center" }}>
-      <div style={{ position: "absolute", top: 8, left: 8, fontWeight: 900, fontSize: small ? 12 : 14, lineHeight: 1, color: red ? "#b91c1c" : "#111827" }}>
-        {rank}
-        <div style={{ fontSize: small ? 12 : 14 }}>{sym}</div>
-      </div>
-      <div style={{ fontSize: small ? 28 : 44, fontWeight: 900, color: red ? "#b91c1c" : "#111827" }}>{sym}</div>
-      <div style={{ position: "absolute", bottom: 8, right: 8, fontWeight: 900, fontSize: small ? 12 : 14, lineHeight: 1, transform: "rotate(180deg)", color: red ? "#b91c1c" : "#111827" }}>
-        {rank}
-        <div style={{ fontSize: small ? 12 : 14 }}>{sym}</div>
-      </div>
-    </div>
-  );
+function cx(...xs) {
+  return xs.filter(Boolean).join(" ");
 }
 
-function CardBack({ small, label }) {
-  const W = small ? 56 : 86;
-  const H = small ? 78 : 122;
-  return (
-    <div style={{ width: W, height: H, borderRadius: 14, background: "#0b1220", border: "1px solid rgba(255,255,255,0.22)", boxShadow: "0 6px 16px rgba(0,0,0,0.12)", position: "relative", overflow: "hidden", display: "grid", placeItems: "center" }}>
+function suitGlyph(s) {
+  if (s === "S") return "♠";
+  if (s === "H") return "♥";
+  if (s === "D") return "♦";
+  if (s === "C") return "♣";
+  return "";
+}
+function isRedSuit(s) {
+  return s === "H" || s === "D";
+}
+
+function CardFace({ card, faceDown = false, small = false }) {
+  const base = small ? "w-16 h-24" : "w-20 h-28";
+  if (faceDown) {
+    return (
       <div
-        style={{
-          position: "absolute",
-          inset: 10,
-          borderRadius: 10,
-          border: "1px solid rgba(255,255,255,0.22)",
-          background:
-            "repeating-linear-gradient(45deg, rgba(255,255,255,0.14) 0, rgba(255,255,255,0.14) 6px, rgba(255,255,255,0.06) 6px, rgba(255,255,255,0.06) 12px)",
-        }}
-      />
-      <div style={{ position: "absolute", bottom: 8, left: 10, fontSize: small ? 10 : 12, opacity: 0.9, color: "white", fontWeight: 900, letterSpacing: 1 }}>KARGO</div>
-      {label && <div style={{ position: "absolute", top: 6, right: 8, fontSize: 11, fontWeight: 900, opacity: 0.75, color: "#111827", background: "rgba(255,255,255,0.85)", border: "1px solid rgba(17,24,39,0.12)", padding: "2px 6px", borderRadius: 999 }}>{label}</div>}
+        className={cx(
+          base,
+          "rounded-xl border border-white/10 bg-gradient-to-br from-slate-800 to-slate-900 shadow-md",
+          "flex items-center justify-center"
+        )}
+      >
+        <div className="w-10 h-14 rounded-lg bg-white/10 border border-white/10" />
+      </div>
+    );
+  }
+  if (!card) {
+    return (
+      <div
+        className={cx(
+          base,
+          "rounded-xl border border-dashed border-white/20 bg-white/5 flex items-center justify-center"
+        )}
+      >
+        <span className="text-white/25 text-xs">EMPTY</span>
+      </div>
+    );
+  }
+  const red = isRedSuit(card.suit);
+  return (
+    <div
+      className={cx(
+        base,
+        "rounded-xl border border-white/10 bg-white shadow-md",
+        "relative overflow-hidden"
+      )}
+    >
+      <div className={cx("absolute inset-0 opacity-10", red ? "bg-red-400" : "bg-slate-900")} />
+      <div className="absolute top-2 left-2 flex flex-col leading-none">
+        <span className={cx("font-bold", red ? "text-red-600" : "text-slate-900")}>{card.rank}</span>
+        <span className={cx("text-lg", red ? "text-red-600" : "text-slate-900")}>{suitGlyph(card.suit)}</span>
+      </div>
+      <div className="absolute bottom-2 right-2 text-3xl">
+        <span className={cx(red ? "text-red-600" : "text-slate-900")}>{suitGlyph(card.suit)}</span>
+      </div>
     </div>
   );
 }
 
-/* ---------------- App ---------------- */
+function StackedUsed({ top2 }) {
+  // show last two used cards stacked (slight offset), face up
+  const a = top2?.[0] ?? null;
+  const b = top2?.[1] ?? null;
+
+  return (
+    <div className="relative w-24 h-32">
+      <div className="absolute left-1 top-1 rotate-[-2deg]">
+        <CardFace card={a} faceDown={!a} small />
+      </div>
+      <div className="absolute left-3 top-3 rotate-[1deg]">
+        <CardFace card={b} faceDown={!b} small />
+      </div>
+    </div>
+  );
+}
+
+function Toast({ msg }) {
+  if (!msg) return null;
+  return (
+    <div className="fixed bottom-4 left-1/2 -translate-x-1/2 px-3 py-2 rounded-lg bg-black/70 border border-white/10 text-white text-sm shadow-lg z-50">
+      {msg}
+    </div>
+  );
+}
+
 export default function App() {
-  const socket = useMemo(() => {
-    if (!SERVER_URL) return null;
-    return io(SERVER_URL, { transports: ["websocket"] });
-  }, []);
-
-  const [connected, setConnected] = useState(false);
-  const [error, setError] = useState("");
-
   const [room, setRoom] = useState(null);
-  const [name, setName] = useState("");
-  const [code, setCode] = useState("");
-
+  const [me, setMe] = useState({ name: "", code: "" });
+  const [view, setView] = useState("home"); // home | room
   const [drawn, setDrawn] = useState(null);
-  const [pairPick, setPairPick] = useState([]);
-  const [peekModal, setPeekModal] = useState(null);
-  const [turnToast, setTurnToast] = useState(false);
+  const [toast, setToast] = useState("");
+  const [pairPick, setPairPick] = useState([]); // two indices
 
-  const prevTurnPidRef = useRef(null);
+  const toastTimer = useRef(null);
+  const myId = socket.id;
+
+  function showToast(m) {
+    setToast(m);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(""), 2400);
+  }
 
   useEffect(() => {
-    if (!socket) return;
-
-    const onConnect = () => setConnected(true);
-    const onDisconnect = () => setConnected(false);
-    const onErr = (m) => setError(String(m || "Unknown error"));
-
-    const onUpdate = (r) => {
-      setRoom(r);
-      setError("");
-
-      // clear drawn if server says not in hasDrawn stage
-      if (r?.turnStage !== "hasDrawn") {
-        setDrawn(null);
-        setPairPick([]);
-      }
-
-      const myId = socket.id;
-      const prevTurn = prevTurnPidRef.current;
-      const curTurn = r?.turnPlayerId ?? null;
-      if (myId && curTurn === myId && prevTurn !== myId && r?.phase === "playing") {
-        setTurnToast(true);
-        setTimeout(() => setTurnToast(false), 1400);
-      }
-      prevTurnPidRef.current = curTurn;
-    };
-
-    const onDrawn = (c) => {
-      setDrawn(c || null);
-      setPairPick([]);
-      setPeekModal(null);
-      setError("");
-    };
-
-    const onPower = (payload) => {
-      const card = payload?.card;
-      if (!card?.rank) return;
-      if (payload.type === "peekSelf") setPeekModal({ title: "Peek: your card", card, qDecision: false });
-      if (payload.type === "peekOther") setPeekModal({ title: "Peek: opponent card", card, qDecision: false });
-      if (payload.type === "qPeekThenDecide") setPeekModal({ title: "Q peeked card", card, qDecision: true });
-    };
-
-    socket.on("connect", onConnect);
-    socket.on("disconnect", onDisconnect);
-    socket.on("error:msg", onErr);
-    socket.on("room:update", onUpdate);
-    socket.on("turn:drawn", onDrawn);
-    socket.on("power:result", onPower);
-
+    socket.on("room:update", (state) => setRoom(state));
+    socket.on("turn:drawn", (card) => setDrawn(card));
+    socket.on("error:msg", (m) => showToast(m));
     return () => {
-      socket.off("connect", onConnect);
-      socket.off("disconnect", onDisconnect);
-      socket.off("error:msg", onErr);
-      socket.off("room:update", onUpdate);
-      socket.off("turn:drawn", onDrawn);
-      socket.off("power:result", onPower);
-      socket.disconnect();
+      socket.off("room:update");
+      socket.off("turn:drawn");
+      socket.off("error:msg");
     };
-  }, [socket]);
+  }, []);
 
-  const myId = socket?.id || null;
-  const players = room?.players || [];
-  const me = players.find((p) => p.id === myId) || null;
+  const isMyTurn = useMemo(() => {
+    if (!room) return false;
+    return room.phase === "playing" && room.turnPlayerId === socket.id;
+  }, [room]);
 
-  const isHost = room?.hostId === myId;
+  const myPlayer = useMemo(() => {
+    if (!room) return null;
+    return room.players.find((p) => p.id === socket.id) || null;
+  }, [room]);
 
-  const kargoActive = !!room?.kargo;
-  const kargoCallerId = room?.kargo?.callerId ?? null;
-  const kargoCallerName = room?.kargo?.callerName ?? null;
-  const activeFinalPlayerId = room?.kargo?.activeFinalPlayerId ?? null;
-  const amIActiveFinal = kargoActive ? activeFinalPlayerId === myId : false;
+  const stage = room?.turnStage || "needDraw";
+  const claim = room?.claim;
 
-  const isMyTurn = room?.turnPlayerId === myId;
-  const amIAllowedToAct = room?.phase === "playing" && (kargoActive ? amIActiveFinal : isMyTurn);
+  const mySlots = myPlayer?.slots || [];
 
-  const powerMode = room?.powerState?.mode ?? "none";
-  const turnStage = room?.turnStage ?? "needDraw";
+  const canClaim = useMemo(() => {
+    if (!room || room.phase !== "playing") return false;
+    return !!claim && claim.state === "open";
+  }, [room, claim]);
 
-  const claimRank = room?.claim?.rank ?? null;
-  const claimState = room?.claim?.state ?? null;
+  const canStart = room && room.phase === "lobby" && room.hostId === socket.id;
+  const canReady = room && room.phase === "ready" && room.readyState && !room.readyState.mine;
 
-  const canDraw = amIAllowedToAct && room?.phase === "playing" && turnStage === "needDraw";
-  const canEndTurn = amIAllowedToAct && room?.phase === "playing" && turnStage === "awaitEnd";
-  const canCallKargo = amIAllowedToAct && room?.phase === "playing" && !kargoActive;
+  // "Your turn" popup
+  const [turnPopup, setTurnPopup] = useState(false);
+  const prevTurnRef = useRef(null);
+  useEffect(() => {
+    if (!room) return;
+    const cur = room.turnPlayerId;
+    if (room.phase === "playing" && cur === socket.id && prevTurnRef.current !== cur) {
+      setTurnPopup(true);
+      setTimeout(() => setTurnPopup(false), 1200);
+    }
+    prevTurnRef.current = cur;
+  }, [room]);
 
-  const canUsePower =
-    !!drawn && ["7", "8", "9", "10", "J", "Q"].includes(drawn.rank) && turnStage === "hasDrawn" && amIAllowedToAct;
+  function createRoom() {
+    if (!me.name.trim()) return showToast("Enter your name");
+    socket.emit("room:create", { name: me.name.trim() });
+    setView("room");
+  }
+  function joinRoom() {
+    if (!me.name.trim()) return showToast("Enter your name");
+    if (!me.code.trim()) return showToast("Enter room code");
+    socket.emit("room:join", { code: me.code.trim().toUpperCase(), name: me.name.trim() });
+    setView("room");
+  }
 
-  const usedTop2 = room?.usedTop2 ?? [];
-  const usedCount = room?.usedCount ?? 0;
+  function startGame() {
+    socket.emit("game:start", { code: room.code });
+    setDrawn(null);
+    setPairPick([]);
+  }
+  function readyUp() {
+    socket.emit("game:ready", { code: room.code });
+  }
 
-  const turnName = players.find((p) => p.id === room?.turnPlayerId)?.name ?? "?";
+  function drawCard() {
+    setDrawn(null);
+    setPairPick([]);
+    socket.emit("turn:draw", { code: room.code });
+  }
 
-  const mySlots = me?.slots ?? [];
-  const base4 = mySlots.slice(0, 4);
-  const extras = mySlots.slice(4);
+  function discardDrawn() {
+    socket.emit("turn:discardDrawn", { code: room.code });
+    setDrawn(null);
+    setPairPick([]);
+  }
 
-  // display order: deck/used then your cards; and slots 0,1 are bottom; 2,3 top
-  const slotDisplayOrder = [2, 3, 0, 1];
+  function endTurn() {
+    socket.emit("turn:end", { code: room.code });
+    setDrawn(null);
+    setPairPick([]);
+  }
 
-  // only show real occupied slots for opponent targeting
-  const myOccupied = me?.occupied ?? [];
-  const activityLog = room?.activityLog ?? [];
+  function tapMySlot(idx) {
+    // Pair selection mode (only on my turn and after drawn)
+    if (isMyTurn && stage === "hasDrawn") {
+      if (pairPick.length === 0) {
+        setPairPick([idx]);
+        return;
+      }
+      if (pairPick.length === 1) {
+        if (pairPick[0] === idx) return;
+        setPairPick([pairPick[0], idx]);
+        return;
+      }
+    }
+  }
 
-  if (!SERVER_URL) {
+  function resolveTap(idx) {
+    socket.emit("turn:resolveTap", { code: room.code, slotIndex: idx });
+    setDrawn(null);
+    setPairPick([]);
+  }
+
+  function throwPair() {
+    if (pairPick.length !== 2) return showToast("Select 2 slots for pair");
+    socket.emit("turn:discardPair", { code: room.code, a: pairPick[0], b: pairPick[1] });
+    setPairPick([]);
+    setDrawn(null);
+  }
+
+  function claimWith(idx) {
+    socket.emit("used:claim", { code: room.code, slotIndex: idx });
+  }
+
+  if (view === "home") {
     return (
-      <div style={page}>
-        <div style={cardWrap}>
-          <h2 style={{ marginTop: 0 }}>Missing VITE_SERVER_URL</h2>
-          <div>Set it in Vercel to your Render URL.</div>
+      <div className="min-h-screen bg-slate-950 text-white">
+        <div className="max-w-md mx-auto px-4 py-10">
+          <h1 className="text-3xl font-extrabold tracking-tight">KARGO</h1>
+          <p className="text-white/60 mt-2 text-sm">
+            Always hidden • Ready shows bottom 2 once • Claim window ends when next player draws
+          </p>
+
+          <div className="mt-8 space-y-4">
+            <label className="block text-sm text-white/70">Your name</label>
+            <input
+              value={me.name}
+              onChange={(e) => setMe((s) => ({ ...s, name: e.target.value }))}
+              placeholder="Add Your Name here…"
+              className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 outline-none"
+            />
+
+            <div className="flex gap-2">
+              <button
+                onClick={createRoom}
+                className="flex-1 px-3 py-2 rounded-lg bg-white text-slate-900 font-semibold"
+              >
+                Create Room
+              </button>
+            </div>
+
+            <div className="mt-6 border-t border-white/10 pt-6">
+              <label className="block text-sm text-white/70">Room code</label>
+              <input
+                value={me.code}
+                onChange={(e) => setMe((s) => ({ ...s, code: e.target.value }))}
+                placeholder="ABCDE"
+                className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 outline-none uppercase"
+              />
+
+              <button
+                onClick={joinRoom}
+                className="w-full mt-3 px-3 py-2 rounded-lg bg-sky-400 text-slate-900 font-semibold"
+              >
+                Join Room
+              </button>
+            </div>
+          </div>
+
+          <Toast msg={toast} />
         </div>
       </div>
     );
   }
 
-  function tapMySlot(slotIndex) {
-    if (!room || !me) return;
-    if (room.phase !== "playing") return;
-
-    // claims always allowed while claim is open
-    if (claimRank) {
-      socket.emit("used:claim", { code: room.code, slotIndex });
-      return;
-    }
-
-    if (powerMode === "selfPeekPick") {
-      socket.emit("power:tapSelfCard", { code: room.code, slotIndex });
-      return;
-    }
-    if (powerMode === "jPickMyCard") {
-      socket.emit("power:tapMyCardForJSwap", { code: room.code, mySlotIndex: slotIndex });
-      return;
-    }
-    if (powerMode === "qPickMyCard") {
-      socket.emit("power:tapMyCardForQSwap", { code: room.code, mySlotIndex: slotIndex });
-      return;
-    }
-
-    if (amIAllowedToAct && turnStage === "hasDrawn" && powerMode === "none") {
-      socket.emit("turn:resolveDrawTap", { code: room.code, slotIndex });
-      return;
-    }
+  if (!room) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center">
+        <div className="text-white/70">Connecting…</div>
+      </div>
+    );
   }
 
-  function tapOtherSlot(otherPlayerId, otherSlotIndex) {
-    if (!room) return;
-
-    // kargo protection: disable caller
-    if (kargoActive && otherPlayerId === kargoCallerId) return;
-
-    if (powerMode === "otherPeekPick" || powerMode === "jPickOpponentCard" || powerMode === "qPickOpponentCard") {
-      socket.emit("power:tapOtherCard", { code: room.code, otherPlayerId, otherSlotIndex });
-    }
-  }
-
-  function togglePairPick(slotIndex) {
-    if (!amIAllowedToAct || turnStage !== "hasDrawn") return;
-    if (!me?.slots?.[slotIndex]?.card) return;
-
-    setPairPick((prev) => {
-      const exists = prev.includes(slotIndex);
-      let next = exists ? prev.filter((x) => x !== slotIndex) : [...prev, slotIndex];
-      if (next.length > 2) next = next.slice(1);
-      return next;
-    });
-  }
-
-  function discardPairNow() {
-    if (pairPick.length !== 2) return;
-    socket.emit("turn:discardPair", { code: room.code, a: pairPick[0], b: pairPick[1] });
-    setPairPick([]);
-  }
+  const turnName = room.players.find((p) => p.id === room.turnPlayerId)?.name || "—";
 
   return (
-    <div style={page}>
-      <style>{`
-        @keyframes toast {
-          0% { transform: translateY(-10px); opacity: 0; }
-          25% { transform: translateY(0px); opacity: 1; }
-          75% { transform: translateY(0px); opacity: 1; }
-          100% { transform: translateY(-10px); opacity: 0; }
-        }
-      `}</style>
+    <div className="min-h-screen bg-slate-950 text-white">
+      {/* Header */}
+      <div className="sticky top-0 z-40 bg-slate-950/90 backdrop-blur border-b border-white/10">
+        <div className="max-w-5xl mx-auto px-3 py-3 flex items-center justify-between">
+          <div>
+            <div className="text-sm text-white/70">Room</div>
+            <div className="text-lg font-bold tracking-wider">{room.code}</div>
+          </div>
 
-      {turnToast && (
-        <div style={toastWrap}>
-          <div style={toastCard}>Your turn</div>
+          <div className="text-right">
+            <div className="text-sm text-white/70">Server</div>
+            <div className="text-xs text-white/60 break-all">{SERVER_URL}</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Activity log top-right */}
+      <div className="fixed top-16 right-3 z-40 w-[min(320px,92vw)]">
+        <div className="bg-black/40 border border-white/10 rounded-xl p-2">
+          <div className="text-xs font-semibold text-white/70 mb-1">Activity</div>
+          <div className="space-y-1 max-h-64 overflow-auto">
+            {(room.activityLog || []).map((x, i) => (
+              <div key={i} className="text-xs text-white/70 leading-snug">
+                {x.msg}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Turn popup */}
+      {turnPopup && (
+        <div className="fixed inset-0 z-50 pointer-events-none flex items-center justify-center">
+          <div className="px-4 py-3 rounded-2xl bg-white text-slate-900 font-extrabold shadow-2xl animate-pulse">
+            Your turn
+          </div>
         </div>
       )}
 
-      <div style={header}>
-        <div>
-          <h1 style={{ margin: 0 }}>KARGO</h1>
-          <div style={{ fontSize: 12, opacity: 0.65 }}>
-            Claim stays open until next draw • Wrong claim = +1 • J/Q logs show slot indices only
-          </div>
-          <div style={{ opacity: 0.75, fontSize: 13 }}>
-            {connected ? "connected" : "disconnected"} • Server: {SERVER_URL}
-          </div>
-        </div>
-
-        {room && (
-          <button
-            style={btnGhost}
-            onClick={() => {
-              socket.emit("room:leave", { code: room.code });
-              setRoom(null);
-              setDrawn(null);
-              setPeekModal(null);
-              setPairPick([]);
-            }}
-          >
-            Leave room
-          </button>
-        )}
-      </div>
-
-      {!room ? (
-        <div style={cardWrap}>
-          <h2 style={{ marginTop: 0 }}>Join your friends</h2>
-
-          <div style={row}>
-            <label style={label}>Your name</label>
-            <input style={input} value={name} onChange={(e) => setName(e.target.value)} placeholder="Add Your Name here…" />
-          </div>
-
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
-            <button style={btn} disabled={!name.trim() || !connected} onClick={() => socket.emit("room:create", { name: name.trim() })}>
-              Create room
-            </button>
-
-            <input style={{ ...input, width: 160 }} value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} placeholder="ROOM CODE" />
-
-            <button
-              style={btn}
-              disabled={!name.trim() || !code.trim() || !connected}
-              onClick={() => socket.emit("room:join", { code: code.trim(), name: name.trim() })}
-            >
-              Join room
-            </button>
-          </div>
-
-          {error && <div style={errorBox}>{error}</div>}
-        </div>
-      ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 320px", gap: 14, alignItems: "start" }}>
-          <div style={cardWrap}>
-            {/* TOP BAR */}
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
+      <div className="max-w-5xl mx-auto px-3 py-5 pb-28">
+        {/* TOP AREA: Deck + Used */}
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center gap-4 flex-wrap">
+            <div className="flex items-center gap-3">
               <div>
-                <div style={{ fontSize: 12, opacity: 0.7 }}>Room</div>
-                <div style={{ fontSize: 34, fontWeight: 900, letterSpacing: 2 }}>{room.code}</div>
-                <div style={{ marginTop: 6, fontSize: 13, opacity: 0.85 }}>
-                  Phase: <b>{room.phase}</b>
-                  {room.phase === "playing" && (
-                    <>
-                      {" "}
-                      • Turn: <b>{turnName}</b> • Stage: <b>{turnStage}</b> • Power: <b>{powerMode}</b>
-                    </>
-                  )}
-                </div>
+                <div className="text-xs text-white/70">Deck</div>
+                <CardFace faceDown small />
               </div>
-
-              {/* LOBBY controls */}
-              {room.phase === "lobby" && (
-                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                  {isHost ? (
-                    <button style={btn} onClick={() => socket.emit("game:start", { code: room.code })}>
-                      Start game
-                    </button>
-                  ) : (
-                    <div style={{ fontSize: 13, opacity: 0.8 }}>Waiting for host to start…</div>
-                  )}
-                </div>
-              )}
-
-              {/* READY */}
-              {room.phase === "ready" && (
-                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                  <button style={btn} disabled={room.readyState?.mine} onClick={() => socket.emit("game:ready", { code: room.code })}>
-                    {room.readyState?.mine ? "Ready ✓" : "Ready"}
-                  </button>
-                  <div style={{ fontSize: 13, opacity: 0.8 }}>
-                    You can see <b>slot 0 & 1</b> once. Press Ready to hide them again.
-                  </div>
-                </div>
-              )}
+              <div>
+                <div className="text-xs text-white/70">Used (last 2)</div>
+                <StackedUsed top2={room.usedTop2} />
+              </div>
             </div>
 
-            {/* Sticky KARGO banner */}
-            {kargoActive && (
-              <div
-                style={{
-                  marginTop: 12,
-                  padding: 10,
-                  borderRadius: 12,
-                  border: "1px solid #fde68a",
-                  background: "#fffbeb",
-                  color: "#92400e",
-                  fontWeight: 900,
-                }}
-              >
-                Kargo was called by {kargoCallerName} — Finish last round
-              </div>
-            )}
+            <div className="ml-auto flex flex-col items-end">
+              {room.phase === "playing" ? (
+                <>
+                  <div className="text-xs text-white/60">Turn</div>
+                  <div className="text-sm font-bold">
+                    {turnName} {isMyTurn ? " (You)" : ""}
+                  </div>
+                  <div className="mt-1 text-xs text-white/60">
+                    {claim ? (
+                      <span>
+                        Claim: <span className="font-semibold">{claim.rank}</span>{" "}
+                        {claim.state === "open" ? "(open)" : "(won)"}
+                      </span>
+                    ) : (
+                      <span>Claim: none</span>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div className="text-sm text-white/70">Phase: {room.phase}</div>
+              )}
+            </div>
+          </div>
 
-            {/* Lobby player list */}
-            {room.phase === "lobby" && (
-              <div style={{ marginTop: 14 }}>
-                <div style={{ fontSize: 12, opacity: 0.7 }}>Players</div>
-                <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
-                  {players.map((p) => (
-                    <div key={p.id} style={{ display: "flex", justifyContent: "space-between", padding: 10, border: "1px solid #e5e7eb", borderRadius: 14 }}>
-                      <div style={{ fontWeight: 900 }}>{p.name}</div>
-                      <div style={{ fontSize: 12, opacity: 0.75 }}>{p.id === room.hostId ? "Host" : ""}</div>
+          {/* Scoreboards */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="bg-white/5 border border-white/10 rounded-2xl p-3">
+              <div className="text-sm font-semibold mb-2">Total Scoreboard</div>
+              <div className="grid grid-cols-2 gap-2">
+                {(room.scoreboard || []).map((x) => (
+                  <div key={x.name} className="flex items-center justify-between text-sm">
+                    <span className="text-white/80">{x.name}</span>
+                    <span className="font-bold">{x.score}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="bg-white/5 border border-white/10 rounded-2xl p-3">
+              <div className="text-sm font-semibold mb-2">Rounds Played</div>
+              <div className="grid grid-cols-2 gap-2">
+                {(room.stats || []).map((x) => (
+                  <div key={x.name} className="flex items-center justify-between text-sm">
+                    <span className="text-white/80">{x.name}</span>
+                    <span className="text-white/80">
+                      {x.roundsWon}/{x.roundsPlayed}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Last round reveal */}
+          {room.lastRound && (
+            <div className="bg-white/5 border border-white/10 rounded-2xl p-3">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="text-sm">
+                  <span className="text-white/70">Last round winner:</span>{" "}
+                  <span className="font-extrabold text-emerald-300 animate-pulse">
+                    {room.lastRound.winnerName}
+                  </span>
+                </div>
+                <div className="text-xs text-white/60">Reason: {room.lastRound.reason}</div>
+              </div>
+
+              <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+                {Object.entries(room.lastRound.reveal || {}).map(([name, cards]) => (
+                  <div key={name} className="bg-black/20 border border-white/10 rounded-xl p-2">
+                    <div className="text-xs font-semibold text-white/80 mb-2">{name}</div>
+                    <div className="flex flex-wrap gap-2">
+                      {cards.map((c, i) => (
+                        <CardFace key={i} card={c} faceDown={!c ? false : false} small />
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-3 text-xs text-white/70">
+                <div className="font-semibold mb-1">Round deltas:</div>
+                <div className="flex flex-wrap gap-3">
+                  {(room.lastRound.deltas || []).map((d) => (
+                    <div key={d.name} className="px-2 py-1 rounded-lg bg-white/5 border border-white/10">
+                      {d.name}: <span className="font-bold">{d.delta}</span> →{" "}
+                      <span className="font-bold">{d.totalAfter}</span>
                     </div>
                   ))}
                 </div>
               </div>
-            )}
+            </div>
+          )}
+        </div>
 
-            {/* PLAYING TABLE */}
-            {room.phase === "playing" && (
-              <>
-                <div style={{ marginTop: 16, display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
-                  <div style={{ display: "grid", gap: 6 }}>
-                    <div style={{ fontSize: 12, opacity: 0.7 }}>Deck</div>
-                    <CardBack />
-                  </div>
-
-                  <div style={{ display: "grid", gap: 6 }}>
-                    <div style={{ fontSize: 12, opacity: 0.7 }}>Drawn</div>
-                    {drawn ? (
-                      <div
-                        style={{ cursor: amIAllowedToAct && turnStage === "hasDrawn" ? "pointer" : "default" }}
-                        onClick={() => {
-                          if (!amIAllowedToAct || turnStage !== "hasDrawn" || !drawn) return;
-                          socket.emit("turn:discardDrawn", { code: room.code });
-                        }}
-                        title="Tap drawn to discard"
-                      >
-                        <CardFace card={drawn} />
-                      </div>
-                    ) : (
-                      <CardBack label="drawn" />
-                    )}
-                    <div style={{ fontSize: 11, opacity: 0.65 }}>Tap drawn to discard</div>
-                  </div>
-
-                  <div style={{ display: "grid", gap: 6 }}>
-                    <div style={{ fontSize: 12, opacity: 0.7 }}>Used (last 2)</div>
-                    <div style={{ display: "flex", gap: 10 }}>
-                      {usedTop2[0] ? <CardFace card={usedTop2[0]} /> : <CardBack label="used" />}
-                      {usedTop2[1] ? <CardFace card={usedTop2[1]} /> : <CardBack label="used" />}
-                    </div>
-                    <div style={{ fontSize: 12, opacity: 0.75 }}>
-                      Used count: <b>{usedCount}</b>{" "}
-                      {claimRank ? (
-                        <span
-                          style={{
-                            marginLeft: 8,
-                            padding: "2px 8px",
-                            borderRadius: 999,
-                            background: claimState === "won" ? "#dcfce7" : "#fee2e2",
-                            color: claimState === "won" ? "#166534" : "#991b1b",
-                            fontWeight: 900,
-                          }}
-                        >
-                          {claimState === "won" ? `claimed ${claimRank}` : `claim ${claimRank}`}
-                        </span>
-                      ) : null}
-                    </div>
-                  </div>
-
-                  {/* Peek modal (private to player) */}
-                  {peekModal?.card?.rank && (
-                    <div style={{ padding: 12, borderRadius: 14, border: "1px solid rgba(17,24,39,0.15)", background: "rgba(255,255,255,0.95)", display: "grid", gap: 10, minWidth: 260 }}>
-                      <div>
-                        <div style={{ fontWeight: 900 }}>{peekModal.title}</div>
-                        <div style={{ fontSize: 12, opacity: 0.75 }}>Temporary reveal.</div>
-                      </div>
-                      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                        <CardFace card={peekModal.card} />
-                        {peekModal.qDecision && powerMode === "qAwaitDecision" ? (
-                          <div style={{ display: "flex", gap: 8 }}>
-                            <button
-                              style={btn}
-                              onClick={() => {
-                                setPeekModal(null);
-                                socket.emit("power:qDecision", { code: room.code, accept: true });
-                              }}
-                            >
-                              Swap
-                            </button>
-                            <button
-                              style={btnGhost}
-                              onClick={() => {
-                                setPeekModal(null);
-                                socket.emit("power:qDecision", { code: room.code, accept: false });
-                              }}
-                            >
-                              Don’t swap
-                            </button>
-                          </div>
-                        ) : (
-                          <button style={btnGhost} onClick={() => setPeekModal(null)}>
-                            Close
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                  <button style={btn} disabled={!canDraw} onClick={() => socket.emit("turn:draw", { code: room.code })}>
-                    Draw
-                  </button>
-
-                  <button style={btnGhost} disabled={!canUsePower || powerMode !== "none"} onClick={() => socket.emit("power:useOnce", { code: room.code })}>
-                    Use Power
-                  </button>
-
-                  <button
-                    style={btnGhost}
-                    disabled={!amIAllowedToAct || turnStage !== "hasDrawn" || powerMode === "none"}
-                    onClick={() => socket.emit("power:cancel", { code: room.code })}
-                  >
-                    Cancel Power
-                  </button>
-
-                  <button style={btnGhost} disabled={!canCallKargo} onClick={() => socket.emit("kargo:call", { code: room.code })}>
-                    Call KARGO
-                  </button>
-
-                  <button style={btn} disabled={!canEndTurn} onClick={() => socket.emit("turn:end", { code: room.code })}>
-                    End Turn
-                  </button>
-
-                  <div style={{ fontSize: 12, opacity: 0.75 }}>{amIAllowedToAct ? "Your turn" : `Waiting for ${turnName}…`}</div>
-                </div>
-
-                {claimRank && (
-                  <div style={{ marginTop: 10, padding: 10, borderRadius: 12, border: "1px solid #fecaca", background: "#fff1f2", color: "#991b1b", fontWeight: 800 }}>
-                    Claim is LIVE (rank {claimRank}) — ends when the next player draws. Tap your matching card to discard it.
-                  </div>
-                )}
-              </>
-            )}
-
-            {/* YOUR CARDS (ready + playing) */}
-            {(room.phase === "ready" || room.phase === "playing") && (
-              <div style={{ marginTop: 18 }}>
-                <div style={{ fontSize: 12, opacity: 0.7 }}>
-                  {room.phase === "ready" ? "Your cards (slot 0/1 visible once)" : "Your cards (tap to play / claim / swap)"}
-                </div>
-
-                <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "repeat(2, max-content)", gap: 12 }}>
-                  {slotDisplayOrder.map((idx) => {
-                    const slot = base4[idx] ?? null;
-                    const isSelectedForPair = pairPick.includes(idx);
-                    const clickable = room.phase === "playing" && !!slot;
-                    return (
-                      <div key={idx} style={{ display: "grid", gap: 6 }}>
-                        {slot?.faceUp && slot?.card ? (
-                          <div onClick={() => clickable && tapMySlot(idx)} style={{ cursor: clickable ? "pointer" : "default" }}>
-                            <CardFace card={slot.card} />
-                          </div>
-                        ) : (
-                          <div
-                            onClick={() => {
-                              if (!clickable) return;
-                              // in hasDrawn stage, allow selecting two cards for pair discard by clicking + shift style
-                              if (amIAllowedToAct && turnStage === "hasDrawn") togglePairPick(idx);
-                              tapMySlot(idx);
-                            }}
-                            style={{ cursor: clickable ? "pointer" : "default", outline: isSelectedForPair ? "3px solid #2563eb" : "none", borderRadius: 16 }}
-                          >
-                            <CardBack label={`slot ${idx}`} />
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {/* penalty cards rendered as real slots */}
-                {extras.length > 0 && (
-                  <div style={{ marginTop: 12 }}>
-                    <div style={{ fontSize: 12, opacity: 0.65, marginBottom: 8 }}>Extra cards</div>
-                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                      {extras.map((_, i) => {
-                        const slotIndex = i + 4;
-                        const isSelectedForPair = pairPick.includes(slotIndex);
-                        return (
-                          <div
-                            key={slotIndex}
-                            style={{ cursor: room.phase === "playing" ? "pointer" : "default", outline: isSelectedForPair ? "3px solid #2563eb" : "none", borderRadius: 16 }}
-                            onClick={() => {
-                              if (room.phase !== "playing") return;
-                              if (amIAllowedToAct && turnStage === "hasDrawn") togglePairPick(slotIndex);
-                              tapMySlot(slotIndex);
-                            }}
-                          >
-                            <CardBack label={`slot ${slotIndex}`} />
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-
-                {/* Pair action button */}
-                {room.phase === "playing" && amIAllowedToAct && turnStage === "hasDrawn" && pairPick.length === 2 && (
-                  <div style={{ marginTop: 12 }}>
-                    <button style={btn} onClick={discardPairNow}>
-                      Throw selected pair
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* OPPONENTS */}
-            {room.phase === "playing" && (
-              <div style={{ marginTop: 18, display: "grid", gap: 14 }}>
-                <div style={{ fontSize: 12, opacity: 0.7 }}>Opponents (tap only during 9/10, J/Q)</div>
-
-                {players
-                  .filter((p) => p.id !== myId)
-                  .map((p) => {
-                    const disabledByKargo = kargoActive && p.id === kargoCallerId;
-                    const canTarget =
-                      !disabledByKargo &&
-                      (powerMode === "otherPeekPick" || powerMode === "jPickOpponentCard" || powerMode === "qPickOpponentCard");
-
-                    return (
-                      <div key={p.id} style={{ padding: 12, borderRadius: 14, border: "1px solid #e5e7eb" }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                          <div style={{ fontWeight: 900 }}>{p.name}</div>
-                          <div style={{ fontSize: 12, opacity: 0.7 }}>
-                            cards: <b>{p.cardCount}</b> {disabledByKargo ? "• protected (KARGO)" : ""}
-                          </div>
-                        </div>
-
-                        <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
-                          {(p.occupied || []).map((slotIdx) => (
-                            <div key={slotIdx} style={{ cursor: canTarget ? "pointer" : "default", opacity: canTarget ? 1 : 0.6 }} onClick={() => canTarget && tapOtherSlot(p.id, slotIdx)}>
-                              <CardBack small label={`slot ${slotIdx}`} />
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    );
-                  })}
-              </div>
-            )}
-
-            {error && <div style={{ ...errorBox, marginTop: 14 }}>{error}</div>}
-          </div>
-
-          {/* Activity Log */}
-          <div style={{ ...cardWrap, position: "sticky", top: 14 }}>
-            <div style={{ fontWeight: 900, marginBottom: 10 }}>Activity</div>
-            <div style={{ display: "grid", gap: 8 }}>
-              {activityLog.length === 0 ? (
-                <div style={{ fontSize: 13, opacity: 0.7 }}>No activity yet…</div>
-              ) : (
-                activityLog.map((x) => (
-                  <div key={x.t} style={{ fontSize: 13, padding: 10, borderRadius: 12, border: "1px solid #e5e7eb", background: "#f9fafb" }}>
-                    {x.msg}
-                  </div>
-                ))
-              )}
+        {/* Players / Lobby */}
+        <div className="mt-5 bg-white/5 border border-white/10 rounded-2xl p-3">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="text-sm font-semibold">Players</div>
+            <div className="text-xs text-white/60">
+              {room.phase === "lobby" ? "Lobby" : room.phase === "ready" ? "Ready check" : "Playing"}
             </div>
           </div>
+
+          <div className="mt-3 flex flex-wrap gap-2">
+            {room.players.map((p) => (
+              <div
+                key={p.id}
+                className={cx(
+                  "px-3 py-2 rounded-xl border text-sm",
+                  p.id === room.turnPlayerId && room.phase === "playing"
+                    ? "bg-emerald-500/15 border-emerald-400/30"
+                    : "bg-white/5 border-white/10"
+                )}
+              >
+                <div className="font-semibold">
+                  {p.name}
+                  {p.id === socket.id ? <span className="text-white/60"> (You)</span> : null}
+                </div>
+                <div className="text-xs text-white/60">
+                  Slots: {p.totalSlots} • Cards: {p.nonEmptyCount}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Host start */}
+          {room.phase === "lobby" && (
+            <div className="mt-3">
+              {canStart ? (
+                <button
+                  onClick={startGame}
+                  className="px-3 py-2 rounded-lg bg-white text-slate-900 font-semibold"
+                >
+                  Start Game
+                </button>
+              ) : (
+                <div className="text-xs text-white/60">Waiting for host to start…</div>
+              )}
+            </div>
+          )}
+
+          {/* Ready */}
+          {room.phase === "ready" && (
+            <div className="mt-3 flex items-center justify-between flex-wrap gap-2">
+              <div className="text-xs text-white/70">
+                You can see your bottom two cards only now. Once you press Ready, they hide again.
+              </div>
+              <button
+                onClick={readyUp}
+                disabled={!canReady}
+                className={cx(
+                  "px-3 py-2 rounded-lg font-semibold",
+                  canReady ? "bg-sky-400 text-slate-900" : "bg-white/10 text-white/50"
+                )}
+              >
+                Ready
+              </button>
+            </div>
+          )}
         </div>
-      )}
+
+        {/* Your Cards */}
+        <div className="mt-5 bg-white/5 border border-white/10 rounded-2xl p-3">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="text-sm font-semibold">Your cards</div>
+            {room.phase === "playing" ? (
+              <div className="text-xs text-white/60">
+                {isMyTurn ? "Your turn" : "Not your turn"} • Stage: {stage}
+              </div>
+            ) : (
+              <div className="text-xs text-white/60">Phase: {room.phase}</div>
+            )}
+          </div>
+
+          <div className="mt-3 grid grid-cols-2 gap-3 w-fit">
+            {mySlots.map((s, idx) => {
+              const isSelected = pairPick.includes(idx);
+              const faceDown = !(s.faceUp && s.card);
+
+              return (
+                <button
+                  key={idx}
+                  onClick={() => {
+                    if (room.phase === "playing" && canClaim && !isMyTurn) {
+                      // claim attempt (anytime claim open; cards are hidden)
+                      claimWith(idx);
+                      return;
+                    }
+                    if (room.phase === "playing" && isMyTurn && stage === "hasDrawn") {
+                      // first choose for pair, or resolve swap/match with long press button below
+                      tapMySlot(idx);
+                      return;
+                    }
+                  }}
+                  className={cx(
+                    "text-left rounded-2xl p-2 border",
+                    isSelected ? "border-amber-300/60 bg-amber-500/10" : "border-white/10 bg-black/10"
+                  )}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="text-xs text-white/60">Slot {idx}</div>
+                    <div className="text-xs text-white/40">{s.state === "empty" ? "empty" : "card"}</div>
+                  </div>
+                  <CardFace card={s.faceUp ? s.card : null} faceDown={s.state === "card" && !s.faceUp} />
+                  <div className="mt-2 text-xs text-white/60">
+                    {room.phase === "playing" && canClaim && !isMyTurn
+                      ? "Tap to claim (hidden)"
+                      : room.phase === "playing" && isMyTurn && stage === "hasDrawn"
+                      ? pairPick.length < 2
+                        ? "Tap to select for pair"
+                        : "Pair selected"
+                      : ""}
+                  </div>
+
+                  {room.phase === "playing" && isMyTurn && stage === "hasDrawn" && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        resolveTap(idx);
+                      }}
+                      className="mt-2 w-full px-2 py-1 rounded-lg bg-white text-slate-900 text-xs font-semibold"
+                    >
+                      Use this slot (swap / match)
+                    </button>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Claim instruction */}
+          {room.phase === "playing" && canClaim && (
+            <div className="mt-3 text-xs text-white/70">
+              Claim is open for <span className="font-bold">{claim.rank}</span>. Tap one of your cards to try. Wrong
+              guess = +1 penalty card.
+            </div>
+          )}
+        </div>
+
+        {/* Bottom controls */}
+        {room.phase === "playing" && (
+          <div className="fixed bottom-0 left-0 right-0 z-40 bg-slate-950/90 backdrop-blur border-t border-white/10">
+            <div className="max-w-5xl mx-auto px-3 py-3 flex flex-wrap gap-2 items-center">
+              <div className="text-xs text-white/70 mr-auto">
+                Turn: <span className="font-semibold">{turnName}</span>
+              </div>
+
+              <button
+                onClick={drawCard}
+                disabled={!isMyTurn || stage !== "needDraw"}
+                className={cx(
+                  "px-3 py-2 rounded-lg font-semibold",
+                  isMyTurn && stage === "needDraw" ? "bg-sky-400 text-slate-900" : "bg-white/10 text-white/50"
+                )}
+              >
+                Draw
+              </button>
+
+              <button
+                onClick={discardDrawn}
+                disabled={!isMyTurn || stage !== "hasDrawn"}
+                className={cx(
+                  "px-3 py-2 rounded-lg font-semibold",
+                  isMyTurn && stage === "hasDrawn" ? "bg-white text-slate-900" : "bg-white/10 text-white/50"
+                )}
+              >
+                Discard Drawn
+              </button>
+
+              <button
+                onClick={throwPair}
+                disabled={!isMyTurn || stage !== "hasDrawn" || pairPick.length !== 2}
+                className={cx(
+                  "px-3 py-2 rounded-lg font-semibold",
+                  isMyTurn && stage === "hasDrawn" && pairPick.length === 2
+                    ? "bg-amber-300 text-slate-900"
+                    : "bg-white/10 text-white/50"
+                )}
+              >
+                Throw Pair
+              </button>
+
+              <button
+                onClick={endTurn}
+                disabled={!isMyTurn || stage !== "awaitEnd"}
+                className={cx(
+                  "px-3 py-2 rounded-lg font-semibold",
+                  isMyTurn && stage === "awaitEnd" ? "bg-emerald-400 text-slate-900" : "bg-white/10 text-white/50"
+                )}
+              >
+                End Turn
+              </button>
+            </div>
+          </div>
+        )}
+
+      </div>
+
+      <Toast msg={toast} />
     </div>
   );
 }
-
-/* ---------- styles ---------- */
-const page = {
-  fontFamily: "system-ui, -apple-system, Segoe UI, Roboto",
-  maxWidth: 1320,
-  margin: "0 auto",
-  padding: 18,
-  display: "grid",
-  gap: 12,
-  background: "#f8fafc",
-  minHeight: "100vh",
-};
-
-const header = { display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 };
-
-const cardWrap = { border: "1px solid #e5e7eb", borderRadius: 16, padding: 16, background: "white" };
-
-const row = { display: "grid", gap: 6 };
-const label = { fontSize: 13, opacity: 0.75 };
-
-const input = { padding: "10px 12px", borderRadius: 12, border: "1px solid #d1d5db", width: 260, outline: "none" };
-
-const btn = {
-  padding: "10px 12px",
-  borderRadius: 12,
-  border: "1px solid #111827",
-  background: "#111827",
-  color: "white",
-  cursor: "pointer",
-  fontWeight: 800,
-};
-
-const btnGhost = { padding: "10px 12px", borderRadius: 12, border: "1px solid #d1d5db", background: "white", cursor: "pointer", fontWeight: 800 };
-
-const errorBox = { padding: 10, borderRadius: 12, border: "1px solid #fecaca", background: "#fff1f2", color: "#9f1239", fontSize: 13 };
-
-const toastWrap = { position: "fixed", top: 16, left: 0, right: 0, display: "grid", placeItems: "center", zIndex: 80, pointerEvents: "none" };
-
-const toastCard = {
-  padding: "10px 14px",
-  borderRadius: 16,
-  border: "1px solid rgba(17,24,39,0.15)",
-  background: "rgba(255,255,255,0.97)",
-  boxShadow: "0 14px 40px rgba(0,0,0,0.18)",
-  fontWeight: 900,
-  animation: "toast 1400ms ease-out",
-  minWidth: 240,
-  textAlign: "center",
-};
