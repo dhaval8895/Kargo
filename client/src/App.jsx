@@ -1,90 +1,227 @@
+// client/src/App.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL;
 
-const SUIT_SYMBOL = { S: "♠", H: "♥", D: "♦", C: "♣", J: "🃏" };
-const isRedSuit = (s) => s === "H" || s === "D";
-const cardLabel = (c) => (c?.rank ? `${c.rank}${c.suit && c.suit !== "J" ? SUIT_SYMBOL[c.suit] : ""}` : "");
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, err: null };
+  }
+  static getDerivedStateFromError(err) {
+    return { hasError: true, err };
+  }
+  componentDidCatch(err, info) {
+    console.error("UI crash:", err, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={page}>
+          <div style={cardWrap}>
+            <h2 style={{ marginTop: 0 }}>UI crashed</h2>
+            <div style={{ fontSize: 13, opacity: 0.85 }}>
+              <b>Error:</b> {String(this.state.err?.message || this.state.err || "Unknown")}
+            </div>
+            <button style={{ ...btn, marginTop: 14 }} onClick={() => window.location.reload()}>
+              Reload
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
-function PlayingCard({ slot, onClick, disabled, highlight, forceBack, small, labelText }) {
-  const hasCard = !!slot?.card?.rank;
-  const faceUp = !!slot?.faceUp;
+/* ---------- Card helpers ---------- */
+function suitSymbol(suit) {
+  if (suit === "S") return "♠";
+  if (suit === "H") return "♥";
+  if (suit === "D") return "♦";
+  if (suit === "C") return "♣";
+  return "🃏";
+}
+function isRedSuit(suit) {
+  return suit === "H" || suit === "D";
+}
+function corner(small) {
+  return { position: "absolute", top: 8, left: 8, fontWeight: 900, fontSize: small ? 12 : 14, lineHeight: 1 };
+}
+function corner2(small) {
+  return {
+    position: "absolute",
+    bottom: 8,
+    right: 8,
+    fontWeight: 900,
+    fontSize: small ? 12 : 14,
+    lineHeight: 1,
+    transform: "rotate(180deg)",
+  };
+}
+function CardFace({ card, small }) {
+  const rank = card?.rank ?? "?";
+  const suit = card?.suit ?? "J";
+  const sym = rank === "JOKER" ? "🃏" : suitSymbol(suit);
+  const red = isRedSuit(suit);
+  return (
+    <>
+      <div style={{ ...corner(small), color: red ? "#b91c1c" : "#111827" }}>
+        {rank}
+        <div style={{ fontSize: small ? 12 : 14 }}>{sym}</div>
+      </div>
+      <div style={{ fontSize: small ? 28 : 44, fontWeight: 900, color: red ? "#b91c1c" : "#111827" }}>{sym}</div>
+      <div style={{ ...corner2(small), color: red ? "#b91c1c" : "#111827" }}>
+        {rank}
+        <div style={{ fontSize: small ? 12 : 14 }}>{sym}</div>
+      </div>
+    </>
+  );
+}
+const slotLabel = {
+  position: "absolute",
+  top: 6,
+  right: 8,
+  fontSize: 11,
+  opacity: 0.7,
+  fontWeight: 900,
+  color: "#111827",
+  background: "rgba(255,255,255,0.85)",
+  border: "1px solid rgba(17,24,39,0.12)",
+  padding: "2px 6px",
+  borderRadius: 999,
+};
 
-  const showFace = hasCard && !forceBack && faceUp;
+function PlayingCard({ slot, onClick, disabled, small = false, labelText, forceBack = false, highlight = false }) {
+  const hasCard = !!slot || forceBack;
+  const faceUp = !!slot?.faceUp && !!slot?.card;
 
-  const w = small ? 64 : 92;
-  const h = small ? 84 : 120;
+  const W = small ? 56 : 86;
+  const H = small ? 78 : 122;
 
-  const base = {
-    width: w,
-    height: h,
+  const outer = {
+    width: W,
+    height: H,
     borderRadius: 14,
-    border: "1px solid rgba(17,24,39,0.18)",
-    background: showFace ? "rgba(255,255,255,0.98)" : "rgba(17,24,39,0.06)",
-    display: "grid",
-    placeItems: "center",
-    position: "relative",
+    border: highlight ? "2px solid #2563eb" : "1px solid #111827",
+    boxShadow: highlight ? "0 10px 26px rgba(37,99,235,0.22)" : "0 6px 16px rgba(0,0,0,0.12)",
     cursor: disabled ? "not-allowed" : "pointer",
     opacity: disabled ? 0.55 : 1,
-    boxShadow: highlight ? "0 12px 26px rgba(99,102,241,0.18)" : "0 10px 22px rgba(17,24,39,0.10)",
     userSelect: "none",
+    background: faceUp ? "white" : "#0b1220",
+    position: "relative",
+    overflow: "hidden",
+    display: "grid",
+    placeItems: "center",
+  };
+
+  const backPattern = {
+    position: "absolute",
+    inset: 10,
+    borderRadius: 10,
+    border: "1px solid rgba(255,255,255,0.25)",
+    background:
+      "repeating-linear-gradient(45deg, rgba(255,255,255,0.12) 0, rgba(255,255,255,0.12) 6px, rgba(255,255,255,0.05) 6px, rgba(255,255,255,0.05) 12px)",
   };
 
   if (!hasCard) {
     return (
       <div
         style={{
-          ...base,
-          background: "rgba(17,24,39,0.03)",
-          border: "1px dashed rgba(17,24,39,0.22)",
+          ...outer,
+          background: "rgba(17,24,39,0.04)",
+          border: highlight ? "2px solid #2563eb" : "1px dashed #9ca3af",
           boxShadow: "none",
-          cursor: "default",
-          opacity: 0.8,
         }}
+        onClick={disabled ? undefined : onClick}
       >
-        <div style={{ fontSize: 11, opacity: 0.6 }}>{labelText || "empty"}</div>
+        <span style={{ opacity: 0.35, fontWeight: 800 }}>—</span>
+        {labelText && <div style={slotLabel}>{labelText}</div>}
       </div>
     );
   }
-
-  if (!showFace) {
-    return (
-      <div style={base} onClick={disabled ? undefined : onClick}>
-        <div
-          style={{
-            width: "86%",
-            height: "86%",
-            borderRadius: 12,
-            background:
-              "linear-gradient(135deg, rgba(15,23,42,0.96), rgba(99,102,241,0.55), rgba(15,23,42,0.96))",
-            border: "1px solid rgba(255,255,255,0.14)",
-          }}
-        />
-        <div style={{ position: "absolute", bottom: 6, fontSize: 10, opacity: 0.7 }}>{labelText || ""}</div>
-      </div>
-    );
-  }
-
-  const c = slot.card;
-  const red = isRedSuit(c.suit);
 
   return (
-    <div style={base} onClick={disabled ? undefined : onClick}>
-      <div style={{ position: "absolute", top: 8, left: 10, fontWeight: 900, color: red ? "#dc2626" : "#111827" }}>
-        {c.rank}
-      </div>
-      <div style={{ fontSize: small ? 26 : 34, color: red ? "#dc2626" : "#111827" }}>{SUIT_SYMBOL[c.suit] || ""}</div>
-      <div style={{ position: "absolute", bottom: 8, right: 10, fontWeight: 900, color: red ? "#dc2626" : "#111827" }}>
-        {c.rank}
-      </div>
-      <div style={{ position: "absolute", bottom: 6, left: 10, fontSize: 10, opacity: 0.6 }}>{labelText || ""}</div>
+    <div style={outer} onClick={disabled ? undefined : onClick}>
+      {faceUp ? (
+        <CardFace card={slot.card} small={small} />
+      ) : (
+        <>
+          <div style={backPattern} />
+          <div
+            style={{
+              position: "absolute",
+              bottom: 8,
+              left: 10,
+              fontSize: small ? 10 : 12,
+              opacity: 0.9,
+              color: "white",
+              fontWeight: 900,
+              letterSpacing: 1,
+            }}
+          >
+            KARGO
+          </div>
+        </>
+      )}
+      {labelText && <div style={slotLabel}>{labelText}</div>}
     </div>
   );
 }
 
+function UsedPileMini({ top2, count, claimRank, claimState }) {
+  const box = { position: "relative", width: 220, height: 140 };
+  const tag = { position: "absolute", right: 0, top: 0, fontSize: 12, opacity: 0.75 };
+
+  const c1 = top2?.[0] ?? null;
+  const c2 = top2?.[1] ?? null;
+
+  return (
+    <div style={box}>
+      <div style={tag}>
+        Used: <b>{count}</b>
+        {claimRank ? (
+          <span
+            style={{
+              marginLeft: 8,
+              padding: "2px 8px",
+              borderRadius: 999,
+              background: claimState === "won" ? "#dcfce7" : "#fee2e2",
+              color: claimState === "won" ? "#166534" : "#991b1b",
+              fontWeight: 900,
+            }}
+          >
+            {claimState === "won" ? `claimed ${claimRank}` : `claim ${claimRank}`}
+          </span>
+        ) : null}
+      </div>
+
+      <div style={{ position: "absolute", left: 0, top: 18, transform: "rotate(-2deg)" }}>
+        <PlayingCard slot={c1 ? { faceUp: true, card: c1 } : null} forceBack={!c1} disabled={true} />
+      </div>
+      <div style={{ position: "absolute", left: 26, top: 8, transform: "rotate(2deg)" }}>
+        <PlayingCard slot={c2 ? { faceUp: true, card: c2 } : null} forceBack={!c2} disabled={true} />
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- App ---------------- */
 export default function App() {
-  const [socket, setSocket] = useState(null);
+  return (
+    <ErrorBoundary>
+      <AppInner />
+    </ErrorBoundary>
+  );
+}
+
+function AppInner() {
+  const socket = useMemo(() => {
+    if (!SERVER_URL) return null;
+    return io(SERVER_URL, { transports: ["websocket"] });
+  }, []);
+
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState("");
 
@@ -93,18 +230,12 @@ export default function App() {
   const [code, setCode] = useState("");
 
   const [drawn, setDrawn] = useState(null);
+  const [pairPick, setPairPick] = useState([]);
   const [peekModal, setPeekModal] = useState(null);
   const [swapToast, setSwapToast] = useState(null);
 
   const [turnToast, setTurnToast] = useState(false);
   const prevTurnPidRef = useRef(null);
-
-  useEffect(() => {
-    if (!SERVER_URL) return;
-    const s = io(SERVER_URL, { transports: ["websocket"] });
-    setSocket(s);
-    return () => s.disconnect();
-  }, []);
 
   useEffect(() => {
     if (!socket) return;
@@ -117,37 +248,43 @@ export default function App() {
       setRoom(r);
       setError("");
 
-      // turn popup
-      const turnPid = r?.turnPlayerId || null;
-      if (r?.phase === "playing" && turnPid && prevTurnPidRef.current && prevTurnPidRef.current !== turnPid) {
-        setTurnToast(true);
-        setTimeout(() => setTurnToast(false), 1200);
+      if (r?.turnStage !== "hasDrawn") {
+        setDrawn(null);
+        setPairPick([]);
       }
-      prevTurnPidRef.current = turnPid;
 
-      if (r?.turnStage !== "hasDrawn") setDrawn(null);
+      const myId = socket.id;
+      const prevTurn = prevTurnPidRef.current;
+      const curTurn = r?.turnPlayerId ?? null;
+      if (myId && curTurn === myId && prevTurn !== myId && r?.phase === "playing") {
+        setTurnToast(true);
+        setTimeout(() => setTurnToast(false), 1400);
+      }
+      prevTurnPidRef.current = curTurn;
     };
 
-    const onDrawn = (card) => setDrawn(card);
+    const onDrawn = (c) => {
+      setDrawn(c || null);
+      setPairPick([]);
+      setPeekModal(null);
+      setError("");
+    };
 
     const onPower = (payload) => {
       const card = payload?.card;
-      if (!card?.rank) return; // defensive
+      if (!card?.rank) return; // defensive: avoids crash
       if (payload.type === "peekSelf") setPeekModal({ title: "Peek: your card", card, qDecision: false });
       if (payload.type === "peekOther") setPeekModal({ title: "Peek: opponent card", card, qDecision: false });
       if (payload.type === "qPeekThenDecide") setPeekModal({ title: "Q peeked card", card, qDecision: true });
     };
 
     const onSwap = (p) => {
-      // For J/Q we never show card faces
-      const message = p?.message || null;
-      if (!message) return;
+      if (!p?.newCard?.rank) return;
       setSwapToast({
         kind: p.kind,
         withPlayer: p.withPlayer,
-        message,
         mySlot: p.mySlot,
-        otherSlot: p.otherSlot,
+        newCard: p.newCard,
       });
       setTimeout(() => setSwapToast(null), 2200);
     };
@@ -168,6 +305,7 @@ export default function App() {
       socket.off("turn:drawn", onDrawn);
       socket.off("power:result", onPower);
       socket.off("swap:notice", onSwap);
+      socket.disconnect();
     };
   }, [socket]);
 
@@ -192,9 +330,7 @@ export default function App() {
 
   const canDraw = amIAllowedToAct && room?.phase === "playing" && turnStage === "needDraw";
   const canEndTurn = amIAllowedToAct && room?.phase === "playing" && turnStage === "awaitEnd";
-
-  const hasPenaltyCards = !!me && me.slots.length > 4 && me.slots.slice(4).some((s) => s?.card);
-  const canCallKargo = amIAllowedToAct && room?.phase === "playing" && !kargoActive && !hasPenaltyCards;
+  const canCallKargo = amIAllowedToAct && room?.phase === "playing" && !kargoActive;
 
   const canUsePower =
     !!drawn &&
@@ -205,7 +341,21 @@ export default function App() {
   const usedTop2 = room?.usedTop2 ?? [];
   const usedCount = room?.usedCount ?? 0;
 
-  const turnName = players.find((p) => p.id === room?.turnPlayerId)?.name ?? "";
+  const turnName = players.find((p) => p.id === room?.turnPlayerId)?.name ?? "?";
+
+  const mySlots = me?.slots ?? [];
+  const base4 = mySlots.slice(0, 4);
+  const extras = mySlots.slice(4);
+  const slotDisplayOrder = [2, 3, 0, 1];
+
+  const lastRound = room?.lastRound ?? null;
+
+  const sortedTotal = [...(room?.scoreboard ?? [])].sort((a, b) => a.score - b.score);
+  const totalWinner = sortedTotal[0]?.name ?? null;
+
+  const roundDeltas = room?.roundBoard?.deltas ?? [];
+  const roundWinner =
+    roundDeltas.length > 0 ? [...roundDeltas].sort((a, b) => a.delta - b.delta)[0]?.name : null; // most negative delta wins
 
   if (!SERVER_URL) {
     return (
@@ -222,7 +372,6 @@ export default function App() {
     if (!room || !me) return;
     if (room.phase !== "playing") return;
 
-    // Claim window (anyone can claim)
     if (claimRank) {
       socket.emit("used:claim", { code: room.code, slotIndex });
       return;
@@ -254,12 +403,9 @@ export default function App() {
     }
   }
 
-  function opponentSlotsByLen(len) {
-    return Array.from({ length: len }, (_, i) => i);
+  function opponentSlots(cardCount) {
+    return Array.from({ length: cardCount }, (_, i) => i);
   }
-
-  const totalWinner = room?.lastRound?.totalWinner ?? null;
-  const roundWinner = room?.lastRound?.roundWinner ?? null;
 
   return (
     <div style={page}>
@@ -271,9 +417,9 @@ export default function App() {
           100% { transform: translateY(-10px); opacity: 0; }
         }
         @keyframes winnerPulse {
-          0% { transform: scale(0.98); }
-          50% { transform: scale(1.03); }
-          100% { transform: scale(1); }
+          0% { transform: scale(0.98); opacity: 0.6; }
+          40% { transform: scale(1.02); opacity: 1; }
+          100% { transform: scale(1); opacity: 1; }
         }
         @keyframes shimmer {
           0% { background-position: 0% 50%; }
@@ -281,56 +427,7 @@ export default function App() {
         }
       `}</style>
 
-      {room?.activityLog?.length ? (
-        <div
-          style={{
-            position: "fixed",
-            top: 16,
-            right: 16,
-            width: 280,
-            maxWidth: "86vw",
-            zIndex: 20,
-            background: "rgba(255,255,255,0.92)",
-            border: "1px solid rgba(17,24,39,0.12)",
-            borderRadius: 14,
-            padding: 10,
-            boxShadow: "0 10px 28px rgba(17,24,39,0.18)",
-            backdropFilter: "blur(6px)",
-          }}
-        >
-          <div style={{ fontWeight: 900, fontSize: 12, marginBottom: 6 }}>Activity</div>
-          <div style={{ display: "grid", gap: 6 }}>
-            {room.activityLog.slice(0, 12).map((a) => (
-              <div key={a.t} style={{ fontSize: 12, lineHeight: 1.25, opacity: 0.9 }}>
-                {a.msg}
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : null}
-
-      {room?.kargo?.callerName ? (
-        <div
-          style={{
-            position: "fixed",
-            left: "50%",
-            transform: "translateX(-50%)",
-            top: 12,
-            zIndex: 25,
-            padding: "10px 14px",
-            borderRadius: 999,
-            border: "1px solid rgba(244,63,94,0.35)",
-            background: "rgba(255,255,255,0.92)",
-            boxShadow: "0 12px 30px rgba(244,63,94,0.18)",
-            fontWeight: 950,
-            fontSize: 13,
-          }}
-        >
-          Kargo was called by <span style={{ color: "#be123c" }}>{room.kargo.callerName}</span> — Finish last round.
-        </div>
-      ) : null}
-
-      {turnToast && room?.phase === "playing" && (
+      {turnToast && (
         <div style={toastWrap}>
           <div style={toastCard}>Your turn</div>
         </div>
@@ -338,15 +435,15 @@ export default function App() {
 
       {swapToast && (
         <div style={toastWrap}>
-          <div style={toastCard}>
-            <div style={{ fontWeight: 900 }}>
+          <div style={{ ...toastCard, pointerEvents: "auto" }}>
+            <div style={{ fontWeight: 950 }}>
               {swapToast.kind} swap with <span style={{ color: "#2563eb" }}>{swapToast.withPlayer}</span>
             </div>
-            <div style={{ fontSize: 12, opacity: 0.85, marginTop: 6 }}>
-              {swapToast.message}
-              {swapToast.kind === "Q" && Number.isFinite(swapToast.mySlot) && Number.isFinite(swapToast.otherSlot) ? (
-                <> (your slot {swapToast.mySlot} ↔ their slot {swapToast.otherSlot})</>
-              ) : null}
+            <div style={{ fontSize: 12, opacity: 0.8, marginTop: 4 }}>
+              Your slot <b>{swapToast.mySlot}</b> is now:
+            </div>
+            <div style={{ marginTop: 8, display: "flex", justifyContent: "center" }}>
+              <PlayingCard slot={{ faceUp: true, card: swapToast.newCard }} disabled={true} />
             </div>
           </div>
         </div>
@@ -354,73 +451,61 @@ export default function App() {
 
       <div style={header}>
         <div>
-          <h1 style={{ margin: 0, fontSize: 18 }}>Kargo</h1>
-          <div style={{ fontSize: 12, opacity: 0.7 }}>
-            Always hidden • 7/8 peek only • 9/10 peek other • J unseen swap • Q seen swap
+          <h1 style={{ margin: 0 }}>KARGO</h1>
+          <div style={{ fontSize: 12, opacity: 0.6 }}>
+            Claim ends when next player draws • Power claim enabled • Wrong claim = +1
+          </div>
+          <div style={{ opacity: 0.75, fontSize: 13 }}>
+            {connected ? "connected" : "disconnected"} • Server: {SERVER_URL}
           </div>
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ fontSize: 12, opacity: connected ? 0.75 : 0.5 }}>{connected ? "Connected" : "Disconnected"}</div>
-          {room && (
-            <button
-              style={btnGhost}
-              onClick={() => {
-                socket.emit("room:leave", { code: room.code });
-                setRoom(null);
-                setDrawn(null);
-                setPeekModal(null);
-                setSwapToast(null);
-              }}
-            >
-              Leave room
-            </button>
-          )}
-        </div>
+        {room && (
+          <button
+            style={btnGhost}
+            onClick={() => {
+              socket.emit("room:leave", { code: room.code });
+              setRoom(null);
+              setDrawn(null);
+              setPeekModal(null);
+              setSwapToast(null);
+            }}
+          >
+            Leave room
+          </button>
+        )}
       </div>
 
       {!room ? (
         <div style={cardWrap}>
           <h2 style={{ marginTop: 0 }}>Join your friends</h2>
 
-          <div style={{ display: "grid", gap: 10, maxWidth: 380 }}>
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Add Your Name here…"
-              style={input}
-            />
-
-            <div style={{ display: "flex", gap: 10 }}>
-              <button
-                style={btn}
-                onClick={() => socket.emit("room:create", { name: name.trim() || "Player" })}
-              >
-                Create room
-              </button>
-            </div>
-
-            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-              <input
-                value={code}
-                onChange={(e) => setCode(e.target.value)}
-                placeholder="Room code"
-                style={{ ...input, width: 140 }}
-              />
-              <button
-                style={btnGhost}
-                onClick={() => socket.emit("room:join", { code: code.trim(), name: name.trim() || "Player" })}
-              >
-                Join room
-              </button>
-            </div>
-
-            {error && <div style={errorBox}>{error}</div>}
+          <div style={row}>
+            <label style={label}>Your name</label>
+            <input style={input} value={name} onChange={(e) => setName(e.target.value)} placeholder="Add Your Name here…" />
           </div>
+
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
+            <button style={btn} disabled={!name.trim() || !connected} onClick={() => socket.emit("room:create", { name: name.trim() })}>
+              Create room
+            </button>
+
+            <input style={{ ...input, width: 160 }} value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} placeholder="ROOM CODE" />
+
+            <button
+              style={btn}
+              disabled={!name.trim() || !code.trim() || !connected}
+              onClick={() => socket.emit("room:join", { code: code.trim(), name: name.trim() })}
+            >
+              Join room
+            </button>
+          </div>
+
+          {error && <div style={errorBox}>{error}</div>}
         </div>
       ) : (
         <div style={cardWrap}>
-          {room.phase === "lobby" && room.lastRound && (
+          {room.phase === "lobby" && lastRound && (
             <div style={{ marginBottom: 16 }}>
               <div
                 style={{
@@ -436,58 +521,106 @@ export default function App() {
                 <div style={{ fontSize: 12, opacity: 0.75 }}>Winners</div>
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 6 }}>
                   {totalWinner && (
-                    <div
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: 999,
-                        background: "#ecfeff",
-                        border: "1px solid #cffafe",
-                        fontWeight: 950,
-                      }}
-                    >
+                    <div style={{ padding: "6px 10px", borderRadius: 999, background: "#ecfeff", border: "1px solid #cffafe", fontWeight: 950 }}>
                       Total Winner: <span style={{ color: "#0e7490" }}>{totalWinner}</span>
                     </div>
                   )}
                   {roundWinner && (
-                    <div
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: 999,
-                        background: "#dcfce7",
-                        border: "1px solid #bbf7d0",
-                        fontWeight: 950,
-                      }}
-                    >
+                    <div style={{ padding: "6px 10px", borderRadius: 999, background: "#dcfce7", border: "1px solid #bbf7d0", fontWeight: 950 }}>
                       Round Winner: <span style={{ color: "#166534" }}>{roundWinner}</span>
                     </div>
                   )}
                 </div>
                 <div style={{ marginTop: 8, fontSize: 12, opacity: 0.8 }}>Round complete — all cards revealed below.</div>
               </div>
+
+              {room.roundBoard?.deltas?.length ? (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ fontSize: 12, opacity: 0.7 }}>Round scoreboard</div>
+                  <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+                    {room.roundBoard.deltas.map((d) => (
+                      <div
+                        key={d.name}
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          padding: 10,
+                          border: "1px solid #e5e7eb",
+                          borderRadius: 14,
+                        }}
+                      >
+                        <div style={{ fontWeight: 900 }}>{d.name}</div>
+                        <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
+                          <div style={{ fontWeight: 900, color: d.delta < 0 ? "#166534" : "#991b1b" }}>
+                            {d.delta >= 0 ? `+${d.delta}` : d.delta}
+                          </div>
+                          <div style={{ opacity: 0.7 }}>Total: {d.totalAfter}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              {room.scoreboard?.length ? (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ fontSize: 12, opacity: 0.7 }}>Total scoreboard</div>
+                  <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+                    {[...room.scoreboard]
+                      .sort((a, b) => a.score - b.score)
+                      .map((s) => (
+                        <div
+                          key={s.name}
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            padding: 10,
+                            border: "1px solid #e5e7eb",
+                            borderRadius: 14,
+                          }}
+                        >
+                          <div style={{ fontWeight: 900 }}>{s.name}</div>
+                          <div style={{ fontWeight: 900 }}>{s.score}</div>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              ) : null}
+
+              {lastRound.reveal && (
+                <div style={{ marginTop: 14 }}>
+                  <div style={{ fontSize: 12, opacity: 0.7 }}>Revealed hands</div>
+                  <div style={{ display: "grid", gap: 12, marginTop: 10 }}>
+                    {Object.entries(lastRound.reveal).map(([pname, cards]) => (
+                      <div key={pname} style={{ padding: 12, borderRadius: 16, border: "1px solid #e5e7eb" }}>
+                        <div style={{ fontWeight: 900, marginBottom: 10 }}>{pname}</div>
+                        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                          {(cards || []).map((c, idx) =>
+                            c ? <PlayingCard key={idx} slot={{ faceUp: true, card: c }} disabled={true} /> : <PlayingCard key={idx} slot={null} disabled={true} />
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-            <div style={pill}>
-              Room: <b>{room.code}</b>
-            </div>
-            <div style={pill}>
-              Phase: <b>{room.phase}</b>
-            </div>
-            <div style={pill}>
-              Turn: <b>{turnName || "—"}</b>
-            </div>
-            <div style={pill}>
-              Used: <b>{usedCount}</b>
-            </div>
-            {claimRank && (
-              <div style={{ ...pill, borderColor: "rgba(244,63,94,0.35)", background: "rgba(244,63,94,0.06)" }}>
-                Claim open: <b>{claimRank}</b> {claimState === "won" ? "(claimed)" : ""}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
+            <div>
+              <div style={{ fontSize: 12, opacity: 0.7 }}>Room code</div>
+              <div style={{ fontSize: 34, fontWeight: 900, letterSpacing: 2 }}>{room.code}</div>
+              <div style={{ marginTop: 6, fontSize: 13, opacity: 0.85 }}>
+                Phase: <b>{room.phase}</b>{" "}
+                {room.phase === "playing" && (
+                  <>
+                    • Turn: <b>{turnName}</b> • Stage: <b>{turnStage}</b> • Power: <b>{powerMode}</b>
+                  </>
+                )}
               </div>
-            )}
-          </div>
+            </div>
 
-          <div style={{ marginTop: 14, display: "grid", gap: 14 }}>
             {room.phase === "lobby" && (
               <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
                 {isHost ? (
@@ -500,79 +633,44 @@ export default function App() {
               </div>
             )}
 
-            {room.phase === "lobby" && (
-              <div
-                style={{
-                  marginTop: 12,
-                  padding: 12,
-                  borderRadius: 14,
-                  border: "1px solid rgba(17,24,39,0.12)",
-                  background: "rgba(255,255,255,0.9)",
-                }}
-              >
-                <div style={{ fontWeight: 900, fontSize: 12, opacity: 0.85, marginBottom: 8 }}>Players</div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                  {players.map((p) => (
-                    <div
-                      key={p.id}
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: 999,
-                        border: "1px solid rgba(17,24,39,0.12)",
-                        background: p.id === room.hostId ? "rgba(99,102,241,0.12)" : "rgba(17,24,39,0.04)",
-                        fontSize: 12,
-                        fontWeight: 850,
-                      }}
-                    >
-                      {p.name}
-                      {p.id === room.hostId ? " (host)" : ""}
-                    </div>
-                  ))}
+            {room.phase === "ready" && (
+              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                <button style={btn} disabled={room.readyState?.mine} onClick={() => socket.emit("game:ready", { code: room.code })}>
+                  {room.readyState?.mine ? "Ready ✓" : "Ready"}
+                </button>
+                <div style={{ fontSize: 13, opacity: 0.8 }}>
+                  See <b>slot 0 & 1</b> now. After Ready, they hide.
                 </div>
               </div>
             )}
+          </div>
 
-            {room.phase === "ready" && (
-              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                <button style={btn} onClick={() => socket.emit("game:ready", { code: room.code })}>
-                  Ready (hide bottom cards)
-                </button>
-                <div style={{ fontSize: 12, opacity: 0.7 }}>This is your only peek at the bottom two.</div>
-              </div>
-            )}
+          {/* TABLE FIRST */}
+          {room.phase === "playing" && (
+            <>
+              <div style={{ marginTop: 16, display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
+                <div style={{ display: "grid", gap: 6 }}>
+                  <div style={{ fontSize: 12, opacity: 0.7 }}>Deck</div>
+                  <PlayingCard forceBack={true} disabled={true} />
+                </div>
 
-            {room.phase === "playing" && (
-              <div style={{ display: "grid", gap: 12 }}>
-                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center" }}>
-                  <div style={{ display: "grid", gap: 8 }}>
-                    <div style={{ fontSize: 12, opacity: 0.7 }}>Deck</div>
-                    <PlayingCard slot={{ faceUp: false, card: { rank: "X", suit: "S" } }} disabled={true} />
-                  </div>
+                <div style={{ display: "grid", gap: 6 }}>
+                  <div style={{ fontSize: 12, opacity: 0.7 }}>Drawn</div>
+                  <PlayingCard
+                    slot={drawn ? { faceUp: true, card: drawn } : null}
+                    forceBack={!drawn}
+                    disabled={!drawn}
+                    onClick={() => {
+                      if (!amIAllowedToAct || turnStage !== "hasDrawn" || !drawn) return;
+                      socket.emit("turn:discardDrawn", { code: room.code });
+                    }}
+                  />
+                  <div style={{ fontSize: 11, opacity: 0.65 }}>Tap drawn to discard</div>
+                </div>
 
-                  <div style={{ display: "grid", gap: 8 }}>
-                    <div style={{ fontSize: 12, opacity: 0.7 }}>Active / Used (top 2)</div>
-                    <div style={{ display: "flex", gap: 10 }}>
-                      <PlayingCard
-                        slot={usedTop2[0] ? { faceUp: true, card: usedTop2[0] } : { faceUp: false, card: { rank: "X", suit: "S" } }}
-                        disabled={true}
-                      />
-                      <PlayingCard
-                        slot={usedTop2[1] ? { faceUp: true, card: usedTop2[1] } : { faceUp: false, card: { rank: "X", suit: "S" } }}
-                        disabled={true}
-                      />
-                    </div>
-                  </div>
-
-                  <div style={{ display: "grid", gap: 8 }}>
-                    <div style={{ fontSize: 12, opacity: 0.7 }}>Drawn</div>
-                    <PlayingCard
-                      slot={drawn ? { faceUp: true, card: drawn } : { faceUp: false, card: { rank: "", suit: "" } }}
-                      disabled={!amIAllowedToAct || turnStage !== "hasDrawn"}
-                      highlight={!!drawn}
-                      onClick={() => socket.emit("turn:discardDrawn", { code: room.code })}
-                      labelText={drawn ? "tap to discard" : ""}
-                    />
-                  </div>
+                <div style={{ display: "grid", gap: 6 }}>
+                  <div style={{ fontSize: 12, opacity: 0.7 }}>Used pile</div>
+                  <UsedPileMini top2={usedTop2} count={usedCount} claimRank={claimRank} claimState={claimState} />
                 </div>
 
                 {peekModal?.card?.rank && (
@@ -622,200 +720,173 @@ export default function App() {
                     </div>
                   </div>
                 )}
+              </div>
 
-                <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                  <button style={btn} disabled={!canDraw} onClick={() => socket.emit("turn:draw", { code: room.code })}>
-                    Draw
-                  </button>
+              <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                <button style={btn} disabled={!canDraw} onClick={() => socket.emit("turn:draw", { code: room.code })}>
+                  Draw
+                </button>
 
-                  <button
-                    style={btnGhost}
-                    disabled={!canUsePower}
-                    onClick={() => socket.emit("power:useOnce", { code: room.code })}
-                  >
-                    Use Power
-                  </button>
+                <button style={btnGhost} disabled={!canUsePower || powerMode !== "none"} onClick={() => socket.emit("power:useOnce", { code: room.code })}>
+                  Use Power
+                </button>
 
-                  <button
-                    style={btnGhost}
-                    disabled={!amIAllowedToAct || turnStage !== "hasDrawn" || powerMode === "none"}
-                    onClick={() => socket.emit("power:cancel", { code: room.code })}
-                  >
-                    Cancel Power
-                  </button>
+                <button
+                  style={btnGhost}
+                  disabled={!amIAllowedToAct || turnStage !== "hasDrawn" || powerMode === "none"}
+                  onClick={() => socket.emit("power:cancel", { code: room.code })}
+                >
+                  Cancel Power
+                </button>
 
-                  <button
-                    style={btnGhost}
-                    disabled={!canCallKargo}
-                    onClick={() => {
-                      if (hasPenaltyCards) {
-                        setError("You can’t call Kargo with penalty cards.");
-                        return;
-                      }
-                      socket.emit("kargo:call", { code: room.code });
-                    }}
-                  >
-                    Call KARGO
-                  </button>
+                <button style={btnGhost} disabled={!canCallKargo} onClick={() => socket.emit("kargo:call", { code: room.code })}>
+                  Call KARGO
+                </button>
 
-                  <button style={btn} disabled={!canEndTurn} onClick={() => socket.emit("turn:end", { code: room.code })}>
-                    End turn
-                  </button>
+                <button style={btn} disabled={!canEndTurn} onClick={() => socket.emit("turn:end", { code: room.code })}>
+                  End Turn
+                </button>
 
-                  {hasPenaltyCards && !kargoActive && (
-                    <div style={{ fontSize: 12, opacity: 0.75 }}>
-                      Kargo blocked: you have penalty cards.
-                    </div>
-                  )}
+                <div style={{ fontSize: 12, opacity: 0.75 }}>{amIAllowedToAct ? "Your turn" : `Waiting for ${turnName}…`}</div>
+              </div>
+
+              {claimRank && (
+                <div
+                  style={{
+                    marginTop: 10,
+                    padding: 10,
+                    borderRadius: 12,
+                    border: "1px solid #fecaca",
+                    background: "#fff1f2",
+                    color: "#991b1b",
+                    fontWeight: 800,
+                  }}
+                >
+                  Claim is LIVE (rank {claimRank}) — ends when the next player draws.
                 </div>
+              )}
+            </>
+          )}
 
-                <div style={{ marginTop: 18 }}>
-                  <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>Your cards (tap to place / claim / power)</div>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(4, max-content)", gap: 12 }}>
-                    {(me?.slots || []).map((s, i) => (
+          {(room.phase === "ready" || room.phase === "playing") && (
+            <div style={{ marginTop: 18 }}>
+              <div style={{ fontSize: 12, opacity: 0.7 }}>
+                {room.phase === "ready" ? "Your cards (slot 0/1 visible once)" : "Your cards (tap)"}
+              </div>
+
+              <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "repeat(2, max-content)", gap: 12 }}>
+                {slotDisplayOrder.map((idx) => {
+                  const slot = base4[idx] ?? null;
+                  return (
+                    <PlayingCard
+                      key={idx}
+                      slot={slot}
+                      labelText={`slot ${idx}`}
+                      disabled={room.phase !== "playing" || !slot}
+                      onClick={() => onTapMySlot(idx)}
+                    />
+                  );
+                })}
+              </div>
+
+              {extras.length > 0 && (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ fontSize: 12, opacity: 0.65, marginBottom: 8 }}>Penalty cards</div>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                    {extras.map((_, i) => (
                       <PlayingCard
                         key={i}
-                        slot={s}
-                        disabled={!room || room.phase !== "playing"}
-                        highlight={amIAllowedToAct && turnStage === "hasDrawn"}
-                        labelText={`slot ${i}`}
-                        onClick={() => onTapMySlot(i)}
+                        slot={null}
+                        forceBack={true}
+                        disabled={false}
+                        labelText={`slot ${i + 4}`}
+                        onClick={() => onTapMySlot(i + 4)}
                       />
                     ))}
                   </div>
                 </div>
+              )}
+            </div>
+          )}
 
-                {room.phase === "playing" && (
-                  <div style={{ marginTop: 18, display: "grid", gap: 14 }}>
-                    <div style={{ fontSize: 12, opacity: 0.7 }}>Opponents (tap only during power)</div>
-                    {players
-                      .filter((p) => p.id !== myId)
-                      .map((p) => (
-                        <div key={p.id} style={{ padding: 12, borderRadius: 14, border: "1px solid #e5e7eb" }}>
-                          <div style={{ fontWeight: 900, marginBottom: 10 }}>{p.name}</div>
-                          <div style={{ display: "grid", gridTemplateColumns: "repeat(8, max-content)", gap: 10 }}>
-                            {opponentSlotsByLen((p.slots || []).length || p.cardCount).map((i) => (
-                              <PlayingCard
-                                key={i}
-                                slot={p.slots && p.slots[i] ? p.slots[i] : null}
-                                forceBack={!!(p.slots && p.slots[i] && p.slots[i].card)}
-                                disabled={
-                                  !(
-                                    (powerMode === "otherPeekPick" ||
-                                      powerMode === "jPickOpponentCard" ||
-                                      powerMode === "qPickOpponentCard") &&
-                                    p.slots &&
-                                    p.slots[i] &&
-                                    p.slots[i].card
-                                  )
-                                }
-                                small={true}
-                                labelText={p.slots && p.slots[i] && p.slots[i].card ? `slot ${i}` : "empty"}
-                                onClick={() => onTapOtherSlot(p.id, i)}
-                              />
-                            ))}
-                          </div>
-                        </div>
+          {room.phase === "playing" && (
+            <div style={{ marginTop: 18, display: "grid", gap: 14 }}>
+              <div style={{ fontSize: 12, opacity: 0.7 }}>Opponents (tap only during power)</div>
+              {players
+                .filter((p) => p.id !== myId)
+                .map((p) => (
+                  <div key={p.id} style={{ padding: 12, borderRadius: 14, border: "1px solid #e5e7eb" }}>
+                    <div style={{ fontWeight: 900, marginBottom: 10 }}>{p.name}</div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(8, max-content)", gap: 10 }}>
+                      {opponentSlots(p.cardCount).map((i) => (
+                        <PlayingCard
+                          key={i}
+                          slot={null}
+                          forceBack={true}
+                          disabled={!(powerMode === "otherPeekPick" || powerMode === "jPickOpponentCard" || powerMode === "qPickOpponentCard")}
+                          small={true}
+                          labelText={`slot ${i}`}
+                          onClick={() => onTapOtherSlot(p.id, i)}
+                        />
                       ))}
+                    </div>
                   </div>
-                )}
+                ))}
+            </div>
+          )}
 
-                {error && <div style={{ ...errorBox, marginTop: 14 }}>{error}</div>}
-              </div>
-            )}
-          </div>
+          {error && <div style={{ ...errorBox, marginTop: 14 }}>{error}</div>}
         </div>
       )}
     </div>
   );
 }
 
-/* ---------------- Styles (no CSS file) ---------------- */
+/* ---------- styles ---------- */
 const page = {
-  minHeight: "100vh",
-  background: "linear-gradient(180deg, #0b1020, #0f172a 45%, #111827)",
-  color: "white",
-  padding: 16,
-};
-
-const header = {
-  display: "flex",
-  justifyContent: "space-between",
-  alignItems: "center",
-  marginBottom: 16,
-};
-
-const cardWrap = {
-  maxWidth: 980,
+  fontFamily: "system-ui, -apple-system, Segoe UI, Roboto",
+  maxWidth: 1300,
   margin: "0 auto",
-  background: "rgba(255,255,255,0.92)",
-  color: "#111827",
-  borderRadius: 18,
-  padding: 16,
-  border: "1px solid rgba(255,255,255,0.18)",
-  boxShadow: "0 20px 60px rgba(0,0,0,0.35)",
+  padding: 18,
+  display: "grid",
+  gap: 12,
+  background: "#f8fafc",
+  minHeight: "100vh",
 };
 
-const input = {
-  padding: "12px 12px",
-  borderRadius: 12,
-  border: "1px solid rgba(17,24,39,0.18)",
-  outline: "none",
-  fontSize: 14,
-};
+const header = { display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 };
+
+const cardWrap = { border: "1px solid #e5e7eb", borderRadius: 16, padding: 16, background: "white" };
+
+const row = { display: "grid", gap: 6 };
+const label = { fontSize: 13, opacity: 0.75 };
+
+const input = { padding: "10px 12px", borderRadius: 12, border: "1px solid #d1d5db", width: 260, outline: "none" };
 
 const btn = {
-  padding: "10px 14px",
+  padding: "10px 12px",
   borderRadius: 12,
-  border: "1px solid rgba(99,102,241,0.45)",
-  background: "#4f46e5",
+  border: "1px solid #111827",
+  background: "#111827",
   color: "white",
-  fontWeight: 900,
   cursor: "pointer",
+  fontWeight: 800,
 };
 
-const btnGhost = {
-  padding: "10px 14px",
-  borderRadius: 12,
-  border: "1px solid rgba(17,24,39,0.16)",
-  background: "rgba(255,255,255,0.92)",
-  color: "#111827",
-  fontWeight: 900,
-  cursor: "pointer",
-};
+const btnGhost = { padding: "10px 12px", borderRadius: 12, border: "1px solid #d1d5db", background: "white", cursor: "pointer", fontWeight: 800 };
 
-const pill = {
-  padding: "6px 10px",
-  borderRadius: 999,
-  border: "1px solid rgba(17,24,39,0.12)",
-  background: "rgba(17,24,39,0.04)",
-  fontSize: 12,
-};
+const errorBox = { padding: 10, borderRadius: 12, border: "1px solid #fecaca", background: "#fff1f2", color: "#9f1239", fontSize: 13 };
 
-const toastWrap = {
-  position: "fixed",
-  top: 70,
-  left: "50%",
-  transform: "translateX(-50%)",
-  zIndex: 30,
-  animation: "toast 1200ms ease-out",
-};
+const toastWrap = { position: "fixed", top: 16, left: 0, right: 0, display: "grid", placeItems: "center", zIndex: 80, pointerEvents: "none" };
 
 const toastCard = {
   padding: "10px 14px",
-  borderRadius: 999,
-  background: "rgba(255,255,255,0.92)",
-  border: "1px solid rgba(17,24,39,0.14)",
-  color: "#111827",
+  borderRadius: 16,
+  border: "1px solid rgba(17,24,39,0.15)",
+  background: "rgba(255,255,255,0.97)",
+  boxShadow: "0 14px 40px rgba(0,0,0,0.18)",
   fontWeight: 900,
-  boxShadow: "0 18px 45px rgba(0,0,0,0.18)",
-};
-
-const errorBox = {
-  padding: 10,
-  borderRadius: 12,
-  background: "rgba(244,63,94,0.12)",
-  border: "1px solid rgba(244,63,94,0.25)",
-  color: "#7f1d1d",
-  fontWeight: 800,
+  animation: "toast 1400ms ease-out",
+  minWidth: 240,
+  textAlign: "center",
 };
