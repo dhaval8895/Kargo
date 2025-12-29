@@ -1,6 +1,6 @@
 // client/src/App.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { io } from "socket.io-client";
+import io from "socket.io-client";
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL;
 
@@ -9,24 +9,24 @@ class ErrorBoundary extends React.Component {
     super(props);
     this.state = { hasError: false, err: null };
   }
-  static getDerivedStateFromError(err) {
-    return { hasError: true, err };
+  static getDerivedStateFromError(error) {
+    return { hasError: true, err: error };
   }
-  componentDidCatch(err, info) {
-    console.error("UI crash:", err, info);
+  componentDidCatch(error) {
+    console.error("UI crashed:", error);
   }
   render() {
     if (this.state.hasError) {
       return (
-        <div style={page}>
+        <div style={{ ...page, padding: 18 }}>
           <div style={cardWrap}>
-            <h2 style={{ marginTop: 0 }}>UI crashed</h2>
-            <div style={{ fontSize: 13, opacity: 0.85 }}>
-              <b>Error:</b> {String(this.state.err?.message || this.state.err || "Unknown")}
+            <div style={{ fontWeight: 900, fontSize: 18 }}>UI crashed</div>
+            <div style={{ marginTop: 10, ...errorBox }}>
+              {String(this.state.err?.message || this.state.err || "Unknown error")}
             </div>
-            <button style={{ ...btn, marginTop: 14 }} onClick={() => window.location.reload()}>
-              Reload
-            </button>
+            <div style={{ marginTop: 12, fontSize: 13, opacity: 0.85 }}>
+              Refresh the page. If this keeps happening, copy the console error and send it to me.
+            </div>
           </div>
         </div>
       );
@@ -35,279 +35,229 @@ class ErrorBoundary extends React.Component {
   }
 }
 
-/* ---------- Card helpers ---------- */
-function suitSymbol(suit) {
-  if (suit === "S") return "♠";
-  if (suit === "H") return "♥";
-  if (suit === "D") return "♦";
-  if (suit === "C") return "♣";
-  return "🃏";
+function suitSymbol(s) {
+  if (s === "S") return "♠";
+  if (s === "C") return "♣";
+  if (s === "H") return "♥";
+  if (s === "D") return "♦";
+  return "";
 }
-function isRedSuit(suit) {
-  return suit === "H" || suit === "D";
+
+function isRedSuit(s) {
+  return s === "H" || s === "D";
 }
-function corner(small) {
-  return { position: "absolute", top: 8, left: 8, fontWeight: 900, fontSize: small ? 12 : 14, lineHeight: 1 };
+
+function rankLabel(r) {
+  return r;
 }
-function corner2(small) {
-  return {
-    position: "absolute",
-    bottom: 8,
-    right: 8,
-    fontWeight: 900,
-    fontSize: small ? 12 : 14,
-    lineHeight: 1,
-    transform: "rotate(180deg)",
-  };
-}
-function CardFace({ card, small }) {
-  const rank = card?.rank ?? "?";
-  const suit = card?.suit ?? "J";
-  const sym = rank === "JOKER" ? "🃏" : suitSymbol(suit);
-  const red = isRedSuit(suit);
-  return (
-    <>
-      <div style={{ ...corner(small), color: red ? "#b91c1c" : "#111827" }}>
-        {rank}
-        <div style={{ fontSize: small ? 12 : 14 }}>{sym}</div>
-      </div>
-      <div style={{ fontSize: small ? 28 : 44, fontWeight: 900, color: red ? "#b91c1c" : "#111827" }}>{sym}</div>
-      <div style={{ ...corner2(small), color: red ? "#b91c1c" : "#111827" }}>
-        {rank}
-        <div style={{ fontSize: small ? 12 : 14 }}>{sym}</div>
-      </div>
-    </>
-  );
-}
-const slotLabel = {
-  position: "absolute",
-  top: 6,
-  right: 8,
-  fontSize: 11,
-  opacity: 0.7,
-  fontWeight: 900,
-  color: "#111827",
-  background: "rgba(255,255,255,0.85)",
-  border: "1px solid rgba(17,24,39,0.12)",
-  padding: "2px 6px",
-  borderRadius: 999,
-};
 
-function PlayingCard({ slot, onClick, disabled, small = false, labelText, forceBack = false, highlight = false }) {
-  const hasCard = !!slot || forceBack;
-  const faceUp = !!slot?.faceUp && !!slot?.card;
+function PlayingCard({ slot, forceBack = false, disabled = false, onClick, badge }) {
+  const faceUp = !!slot?.faceUp;
+  const card = slot?.card;
+  const showFront = !forceBack && faceUp && !!card;
 
-  const W = small ? 56 : 86;
-  const H = small ? 78 : 122;
-
-  const outer = {
-    width: W,
-    height: H,
-    borderRadius: 14,
-    border: highlight ? "2px solid #2563eb" : "1px solid #111827",
-    boxShadow: highlight ? "0 10px 26px rgba(37,99,235,0.22)" : "0 6px 16px rgba(0,0,0,0.12)",
-    cursor: disabled ? "not-allowed" : "pointer",
-    opacity: disabled ? 0.55 : 1,
-    userSelect: "none",
-    background: faceUp ? "white" : "#0b1220",
-    position: "relative",
-    overflow: "hidden",
-    display: "grid",
-    placeItems: "center",
-  };
-
-  const backPattern = {
-    position: "absolute",
-    inset: 10,
-    borderRadius: 10,
-    border: "1px solid rgba(255,255,255,0.25)",
-    background:
-      "repeating-linear-gradient(45deg, rgba(255,255,255,0.12) 0, rgba(255,255,255,0.12) 6px, rgba(255,255,255,0.05) 6px, rgba(255,255,255,0.05) 12px)",
-  };
-
-  if (!hasCard) {
-    return (
-      <div
-        style={{
-          ...outer,
-          background: "rgba(17,24,39,0.04)",
-          border: highlight ? "2px solid #2563eb" : "1px dashed #9ca3af",
-          boxShadow: "none",
-        }}
-        onClick={disabled ? undefined : onClick}
-      >
-        <span style={{ opacity: 0.35, fontWeight: 800 }}>—</span>
-        {labelText && <div style={slotLabel}>{labelText}</div>}
-      </div>
-    );
-  }
+  const border = disabled ? "1px solid #e5e7eb" : "1px solid rgba(17,24,39,0.18)";
+  const bg = showFront ? "white" : "#0f172a";
+  const color = showFront ? (isRedSuit(card.suit) ? "#dc2626" : "#111827") : "rgba(255,255,255,0.88)";
 
   return (
-    <div style={outer} onClick={disabled ? undefined : onClick}>
-      {faceUp ? (
-        <CardFace card={slot.card} small={small} />
+    <div
+      onClick={disabled ? undefined : onClick}
+      role={disabled ? undefined : "button"}
+      style={{
+        width: 86,
+        height: 120,
+        borderRadius: 16,
+        border,
+        background: bg,
+        boxShadow: "0 8px 18px rgba(15,23,42,0.10)",
+        display: "grid",
+        placeItems: "center",
+        cursor: disabled ? "default" : "pointer",
+        position: "relative",
+        userSelect: "none",
+        overflow: "hidden",
+      }}
+    >
+      {showFront ? (
+        <div style={{ width: "100%", height: "100%", padding: 10, display: "grid", gridTemplateRows: "auto 1fr auto" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 900, color }}>
+            <span>{rankLabel(card.rank)}</span>
+            <span>{suitSymbol(card.suit)}</span>
+          </div>
+          <div style={{ display: "grid", placeItems: "center", fontSize: 42, color, fontWeight: 900 }}>
+            {suitSymbol(card.suit)}
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 900, color, transform: "rotate(180deg)" }}>
+            <span>{rankLabel(card.rank)}</span>
+            <span>{suitSymbol(card.suit)}</span>
+          </div>
+        </div>
       ) : (
-        <>
-          <div style={backPattern} />
+        <div style={{ width: "100%", height: "100%", padding: 10, display: "grid", placeItems: "center" }}>
           <div
             style={{
-              position: "absolute",
-              bottom: 8,
-              left: 10,
-              fontSize: small ? 10 : 12,
-              opacity: 0.9,
-              color: "white",
+              width: "100%",
+              height: "100%",
+              borderRadius: 12,
+              border: "1px solid rgba(255,255,255,0.18)",
+              background:
+                "linear-gradient(135deg, rgba(255,255,255,0.12) 0%, rgba(255,255,255,0.05) 40%, rgba(255,255,255,0.10) 100%)",
+              display: "grid",
+              placeItems: "center",
+              color: "rgba(255,255,255,0.85)",
               fontWeight: 900,
               letterSpacing: 1,
+              fontSize: 12,
             }}
           >
             KARGO
           </div>
-        </>
+        </div>
       )}
-      {labelText && <div style={slotLabel}>{labelText}</div>}
+
+      {!!badge && (
+        <div
+          style={{
+            position: "absolute",
+            top: 8,
+            left: 8,
+            padding: "3px 8px",
+            borderRadius: 999,
+            background: "rgba(17,24,39,0.10)",
+            border: "1px solid rgba(17,24,39,0.15)",
+            fontSize: 11,
+            fontWeight: 900,
+            color: showFront ? "#111827" : "rgba(255,255,255,0.9)",
+          }}
+        >
+          {badge}
+        </div>
+      )}
     </div>
   );
 }
 
-function UsedPileMini({ top2, count, claimRank, claimState }) {
-  const box = { position: "relative", width: 220, height: 140 };
-  const tag = { position: "absolute", right: 0, top: 0, fontSize: 12, opacity: 0.75 };
-
-  const c1 = top2?.[0] ?? null;
-  const c2 = top2?.[1] ?? null;
+function Stack({ top2, count, showBackWhenEmpty = false }) {
+  const top = top2?.[0] || null;
+  const second = top2?.[1] || null;
 
   return (
-    <div style={box}>
-      <div style={tag}>
-        Used: <b>{count}</b>
-        {claimRank ? (
-          <span
-            style={{
-              marginLeft: 8,
-              padding: "2px 8px",
-              borderRadius: 999,
-              background: claimState === "won" ? "#dcfce7" : "#fee2e2",
-              color: claimState === "won" ? "#166534" : "#991b1b",
-              fontWeight: 900,
-            }}
-          >
-            {claimState === "won" ? `claimed ${claimRank}` : `claim ${claimRank}`}
-          </span>
-        ) : null}
+    <div style={{ display: "grid", gap: 6 }}>
+      <div style={{ fontSize: 12, opacity: 0.7 }}>
+        Used (last 2) • {count ?? 0}
       </div>
 
-      <div style={{ position: "absolute", left: 0, top: 18, transform: "rotate(-2deg)" }}>
-        <PlayingCard slot={c1 ? { faceUp: true, card: c1 } : null} forceBack={!c1} disabled={true} />
-      </div>
-      <div style={{ position: "absolute", left: 26, top: 8, transform: "rotate(2deg)" }}>
-        <PlayingCard slot={c2 ? { faceUp: true, card: c2 } : null} forceBack={!c2} disabled={true} />
+      <div style={{ position: "relative", width: 92, height: 130 }}>
+        {/* bottom card */}
+        <div style={{ position: "absolute", top: 6, left: 6 }}>
+          <PlayingCard slot={second ? { faceUp: true, card: second } : showBackWhenEmpty ? { faceUp: false, card: null } : null} forceBack={!second} disabled />
+        </div>
+
+        {/* top card */}
+        <div style={{ position: "absolute", top: 0, left: 0 }}>
+          <PlayingCard
+            slot={top ? { faceUp: true, card: top } : showBackWhenEmpty ? { faceUp: false, card: null } : null}
+            forceBack={!top}
+            disabled
+          />
+        </div>
       </div>
     </div>
   );
 }
 
-/* ---------------- App ---------------- */
 export default function App() {
-  return (
-    <ErrorBoundary>
-      <AppInner />
-    </ErrorBoundary>
-  );
-}
-
-function AppInner() {
-  const socket = useMemo(() => {
-    if (!SERVER_URL) return null;
-    return io(SERVER_URL, { transports: ["websocket"] });
-  }, []);
-
+  const [socket, setSocket] = useState(null);
   const [connected, setConnected] = useState(false);
-  const [error, setError] = useState("");
+  const [errMsg, setErrMsg] = useState("");
+  const [toast, setToast] = useState("");
 
-  const [room, setRoom] = useState(null);
   const [name, setName] = useState("");
-  const [code, setCode] = useState("");
-
+  const [room, setRoom] = useState(null);
+  const [joinCode, setJoinCode] = useState("");
   const [drawn, setDrawn] = useState(null);
-  const [pairPick, setPairPick] = useState([]);
-  const [peekModal, setPeekModal] = useState(null);
-  const [swapToast, setSwapToast] = useState(null);
 
-  const [turnToast, setTurnToast] = useState(false);
-  const prevTurnPidRef = useRef(null);
+  const [peekModal, setPeekModal] = useState(null);
+  const toastTimer = useRef(null);
+
+  function showToast(msg) {
+    setToast(msg);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(""), 2500);
+  }
 
   useEffect(() => {
-    if (!socket) return;
+    const s = io(SERVER_URL || window.location.origin, { transports: ["websocket"] });
+    setSocket(s);
 
-    const onConnect = () => setConnected(true);
-    const onDisconnect = () => setConnected(false);
-    const onErr = (m) => setError(String(m || "Unknown error"));
-
-    const onUpdate = (r) => {
+    function onConnect() {
+      setConnected(true);
+      setErrMsg("");
+    }
+    function onDisconnect() {
+      setConnected(false);
+    }
+    function onErr(msg) {
+      setErrMsg(String(msg || "Error"));
+      showToast(String(msg || "Error"));
+    }
+    function onUpdate(r) {
       setRoom(r);
-      setError("");
-
-      if (r?.turnStage !== "hasDrawn") {
-        setDrawn(null);
-        setPairPick([]);
+    }
+    function onDrawn(card) {
+      setDrawn(card);
+    }
+    function onPower(payload) {
+      if (!payload) return;
+      if (payload.type === "peekSelf") {
+        setPeekModal({ title: "Peek your card", card: payload.card });
+        return;
       }
-
-      const myId = socket.id;
-      const prevTurn = prevTurnPidRef.current;
-      const curTurn = r?.turnPlayerId ?? null;
-      if (myId && curTurn === myId && prevTurn !== myId && r?.phase === "playing") {
-        setTurnToast(true);
-        setTimeout(() => setTurnToast(false), 1400);
+      if (payload.type === "peekOther") {
+        setPeekModal({ title: `Peek ${payload.playerName}'s card`, card: payload.card });
+        return;
       }
-      prevTurnPidRef.current = curTurn;
-    };
+      if (payload.type === "qPreview") {
+        setPeekModal({
+          title: `Q preview: ${payload.otherPlayerName}`,
+          card: payload.card,
+          q: {
+            otherPlayerId: payload.otherPlayerId,
+            otherSlotIndex: payload.otherSlotIndex,
+          },
+        });
+        return;
+      }
+    }
+    function onSwap(payload) {
+      // keep it compact — never reveal card faces
+      if (payload?.type === "J") {
+        showToast(`${payload.aName} swapped with ${payload.bName}`);
+      } else if (payload?.type === "Q") {
+        showToast(`${payload.aName} swapped with ${payload.bName}`);
+      }
+    }
 
-    const onDrawn = (c) => {
-      setDrawn(c || null);
-      setPairPick([]);
-      setPeekModal(null);
-      setError("");
-    };
-
-    const onPower = (payload) => {
-      const card = payload?.card;
-      if (!card?.rank) return; // defensive: avoids crash
-      if (payload.type === "peekSelf") setPeekModal({ title: "Peek: your card", card, qDecision: false });
-      if (payload.type === "peekOther") setPeekModal({ title: "Peek: opponent card", card, qDecision: false });
-      if (payload.type === "qPeekThenDecide") setPeekModal({ title: "Q peeked card", card, qDecision: true });
-    };
-
-    const onSwap = (p) => {
-      if (!p?.newCard?.rank) return;
-      setSwapToast({
-        kind: p.kind,
-        withPlayer: p.withPlayer,
-        mySlot: p.mySlot,
-        newCard: p.newCard,
-      });
-      setTimeout(() => setSwapToast(null), 2200);
-    };
-
-    socket.on("connect", onConnect);
-    socket.on("disconnect", onDisconnect);
-    socket.on("error:msg", onErr);
-    socket.on("room:update", onUpdate);
-    socket.on("turn:drawn", onDrawn);
-    socket.on("power:result", onPower);
-    socket.on("swap:notice", onSwap);
+    s.on("connect", onConnect);
+    s.on("disconnect", onDisconnect);
+    s.on("error:msg", onErr);
+    s.on("room:update", onUpdate);
+    s.on("turn:drawn", onDrawn);
+    s.on("power:result", onPower);
+    s.on("swap:notice", onSwap);
 
     return () => {
-      socket.off("connect", onConnect);
-      socket.off("disconnect", onDisconnect);
-      socket.off("error:msg", onErr);
-      socket.off("room:update", onUpdate);
-      socket.off("turn:drawn", onDrawn);
-      socket.off("power:result", onPower);
-      socket.off("swap:notice", onSwap);
-      socket.disconnect();
+      s.off("connect", onConnect);
+      s.off("disconnect", onDisconnect);
+      s.off("error:msg", onErr);
+      s.off("room:update", onUpdate);
+      s.off("turn:drawn", onDrawn);
+      s.off("power:result", onPower);
+      s.off("swap:notice", onSwap);
+      s.disconnect();
     };
-  }, [socket]);
+  }, []);
 
   const myId = socket?.id || null;
   const players = room?.players || [];
@@ -315,57 +265,49 @@ function AppInner() {
 
   const isHost = room?.hostId === myId;
 
-  const kargoActive = !!room?.kargo;
-  const activeFinalPlayerId = room?.kargo?.activeFinalPlayerId ?? null;
-  const amIActiveFinal = kargoActive ? activeFinalPlayerId === myId : false;
+  const turnName = useMemo(() => {
+    const p = players.find((x) => x.id === room?.turnPlayerId);
+    return p?.name || "—";
+  }, [room?.turnPlayerId, players]);
 
-  const isMyTurn = room?.turnPlayerId === myId;
-  const amIAllowedToAct = room?.phase === "playing" && (kargoActive ? amIActiveFinal : isMyTurn);
-
+  const turnStage = room?.turnStage || "—";
   const powerMode = room?.powerState?.mode ?? "none";
-  const turnStage = room?.turnStage ?? "needDraw";
 
-  const claimRank = room?.claim?.rank ?? null;
-  const claimState = room?.claim?.state ?? null;
+  const usedTop2 = room?.usedTop2 || [];
+  const usedCount = room?.usedCount || 0;
 
-  const canDraw = amIAllowedToAct && room?.phase === "playing" && turnStage === "needDraw";
-  const canEndTurn = amIAllowedToAct && room?.phase === "playing" && turnStage === "awaitEnd";
-  const canCallKargo = amIAllowedToAct && room?.phase === "playing" && !kargoActive;
+  const claimRank = room?.claim?.rank || null;
 
-  const canUsePower =
-    !!drawn &&
-    ["7", "8", "9", "10", "J", "Q"].includes(drawn.rank) &&
-    turnStage === "hasDrawn" &&
-    amIAllowedToAct;
+  const lastRound = room?.lastRound || null;
 
-  const usedTop2 = room?.usedTop2 ?? [];
-  const usedCount = room?.usedCount ?? 0;
+  const amIAllowedToAct = room?.phase === "playing" && room?.turnPlayerId === myId;
 
-  const turnName = players.find((p) => p.id === room?.turnPlayerId)?.name ?? "?";
+  function safeName(n) {
+    return String(n || "").trim().slice(0, 18);
+  }
 
-  const mySlots = me?.slots ?? [];
-  const base4 = mySlots.slice(0, 4);
-  const extras = mySlots.slice(4);
-  const slotDisplayOrder = [2, 3, 0, 1];
+  function createRoom() {
+    if (!socket) return;
+    const n = safeName(name);
+    if (!n) return showToast("Add your name first.");
+    socket.emit("room:create", { name: n });
+  }
 
-  const lastRound = room?.lastRound ?? null;
+  function joinRoom() {
+    if (!socket) return;
+    const n = safeName(name);
+    if (!n) return showToast("Add your name first.");
+    const c = String(joinCode || "").toUpperCase().trim();
+    if (!c) return showToast("Enter a room code.");
+    socket.emit("room:join", { code: c, name: n });
+  }
 
-  const sortedTotal = [...(room?.scoreboard ?? [])].sort((a, b) => a.score - b.score);
-  const totalWinner = sortedTotal[0]?.name ?? null;
-
-  const roundDeltas = room?.roundBoard?.deltas ?? [];
-  const roundWinner =
-    roundDeltas.length > 0 ? [...roundDeltas].sort((a, b) => a.delta - b.delta)[0]?.name : null; // most negative delta wins
-
-  if (!SERVER_URL) {
-    return (
-      <div style={page}>
-        <div style={cardWrap}>
-          <h2 style={{ marginTop: 0 }}>Missing VITE_SERVER_URL</h2>
-          <div>Set it in Vercel to your Render URL.</div>
-        </div>
-      </div>
-    );
+  function leaveRoom() {
+    if (!socket) return;
+    socket.emit("room:leave", { code: room?.code });
+    setRoom(null);
+    setDrawn(null);
+    setPeekModal(null);
   }
 
   function onTapMySlot(slotIndex) {
@@ -381,232 +323,149 @@ function AppInner() {
       socket.emit("power:tapSelfCard", { code: room.code, slotIndex });
       return;
     }
-    if (powerMode === "jPickMyCard") {
-      socket.emit("power:tapMyCardForJSwap", { code: room.code, mySlotIndex: slotIndex });
-      return;
-    }
-    if (powerMode === "qPickMyCard") {
-      socket.emit("power:tapMyCardForQSwap", { code: room.code, mySlotIndex: slotIndex });
+
+    if (powerMode === "otherPeekPick") {
+      // selecting your own card does nothing in otherPeek mode
       return;
     }
 
-    if (amIAllowedToAct && turnStage === "hasDrawn" && powerMode === "none") {
+    if (powerMode === "jPickMyCard") {
+      socket.emit("power:tapMyCardForJSwap", { code: room.code, slotIndex });
+      return;
+    }
+
+    if (powerMode === "qPickMyCard") {
+      socket.emit("power:tapMyCardForQSwap", { code: room.code, slotIndex });
+      return;
+    }
+
+    if (!amIAllowedToAct) return;
+
+    // Core action: resolve draw by tapping a slot
+    if (turnStage === "hasDrawn" && drawn) {
       socket.emit("turn:resolveDrawTap", { code: room.code, slotIndex });
       return;
     }
+
+    showToast("Draw a card first.");
   }
 
-  function onTapOtherSlot(otherPlayerId, otherSlotIndex) {
+  function onTapOtherSlot(otherPlayerId, slotIndex) {
     if (!room) return;
-    if (powerMode === "otherPeekPick" || powerMode === "jPickOpponentCard" || powerMode === "qPickOpponentCard") {
-      socket.emit("power:tapOtherCard", { code: room.code, otherPlayerId, otherSlotIndex });
+    if (room.phase !== "playing") return;
+
+    if (powerMode === "otherPeekPick") {
+      socket.emit("power:tapOtherCard", { code: room.code, otherPlayerId, slotIndex });
+      return;
+    }
+
+    if (powerMode === "jPickOtherCard") {
+      socket.emit("power:tapOtherForJSwap", { code: room.code, otherPlayerId, slotIndex });
+      return;
+    }
+
+    if (powerMode === "qPickOtherCard") {
+      socket.emit("power:tapOtherForQSwap", { code: room.code, otherPlayerId, slotIndex });
+      return;
     }
   }
 
-  function opponentSlots(cardCount) {
-    return Array.from({ length: cardCount }, (_, i) => i);
+  if (!room) {
+    return (
+      <ErrorBoundary>
+        <div style={page}>
+          <div style={header}>
+            <div style={{ display: "grid", gap: 4 }}>
+              <div style={{ fontSize: 26, fontWeight: 950 }}>Kargo</div>
+              <div style={{ fontSize: 13, opacity: 0.75 }}>Browser-only multiplayer</div>
+            </div>
+            <div style={{ fontSize: 12, opacity: 0.7 }}>
+              Socket: <b>{connected ? "connected" : "disconnected"}</b>
+            </div>
+          </div>
+
+          <div style={cardWrap}>
+            <div style={{ display: "grid", gap: 10, maxWidth: 520 }}>
+              <div style={{ display: "grid", gap: 6 }}>
+                <div style={{ fontSize: 12, opacity: 0.7 }}>Your name</div>
+                <input
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="Add Your Name here…"
+                  style={input}
+                />
+              </div>
+
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <button style={btn} onClick={createRoom}>
+                  Create room
+                </button>
+
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <input value={joinCode} onChange={(e) => setJoinCode(e.target.value)} placeholder="ROOM CODE" style={inputSm} />
+                  <button style={btn} onClick={joinRoom}>
+                    Join
+                  </button>
+                </div>
+              </div>
+
+              {errMsg && <div style={errorBox}>{errMsg}</div>}
+            </div>
+          </div>
+
+          {toast && (
+            <div style={toastWrap}>
+              <div style={toastCard}>{toast}</div>
+            </div>
+          )}
+        </div>
+      </ErrorBoundary>
+    );
   }
 
   return (
-    <div style={page}>
-      <style>{`
-        @keyframes toast {
-          0% { transform: translateY(-10px); opacity: 0; }
-          25% { transform: translateY(0px); opacity: 1; }
-          75% { transform: translateY(0px); opacity: 1; }
-          100% { transform: translateY(-10px); opacity: 0; }
-        }
-        @keyframes winnerPulse {
-          0% { transform: scale(0.98); opacity: 0.6; }
-          40% { transform: scale(1.02); opacity: 1; }
-          100% { transform: scale(1); opacity: 1; }
-        }
-        @keyframes shimmer {
-          0% { background-position: 0% 50%; }
-          100% { background-position: 100% 50%; }
-        }
-      `}</style>
-
-      {turnToast && (
-        <div style={toastWrap}>
-          <div style={toastCard}>Your turn</div>
-        </div>
-      )}
-
-      {swapToast && (
-        <div style={toastWrap}>
-          <div style={{ ...toastCard, pointerEvents: "auto" }}>
-            <div style={{ fontWeight: 950 }}>
-              {swapToast.kind} swap with <span style={{ color: "#2563eb" }}>{swapToast.withPlayer}</span>
-            </div>
-            <div style={{ fontSize: 12, opacity: 0.8, marginTop: 4 }}>
-              Your slot <b>{swapToast.mySlot}</b> is now:
-            </div>
-            <div style={{ marginTop: 8, display: "flex", justifyContent: "center" }}>
-              <PlayingCard slot={{ faceUp: true, card: swapToast.newCard }} disabled={true} />
+    <ErrorBoundary>
+      <div style={page}>
+        <div style={header}>
+          <div style={{ display: "grid", gap: 4 }}>
+            <div style={{ fontSize: 26, fontWeight: 950 }}>Kargo</div>
+            <div style={{ fontSize: 13, opacity: 0.75 }}>
+              Always hidden • 7/8 peek only • 9/10 peek other • J unseen swap • Q seen swap
             </div>
           </div>
-        </div>
-      )}
 
-      <div style={header}>
-        <div>
-          <h1 style={{ margin: 0 }}>KARGO</h1>
-          <div style={{ fontSize: 12, opacity: 0.6 }}>
-            Claim ends when next player draws • Power claim enabled • Wrong claim = +1
-          </div>
-          <div style={{ opacity: 0.75, fontSize: 13 }}>
-            {connected ? "connected" : "disconnected"} • Server: {SERVER_URL}
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ fontSize: 12, opacity: 0.7 }}>
+              Socket: <b>{connected ? "connected" : "disconnected"}</b>
+            </div>
+            <button style={btnGhost} onClick={leaveRoom}>
+              Leave room
+            </button>
           </div>
         </div>
 
-        {room && (
-          <button
-            style={btnGhost}
-            onClick={() => {
-              socket.emit("room:leave", { code: room.code });
-              setRoom(null);
-              setDrawn(null);
-              setPeekModal(null);
-              setSwapToast(null);
+        {/* KARGO banner (persistent) */}
+        {room.kargo?.calledById && (
+          <div
+            style={{
+              ...cardWrap,
+              border: "1px solid rgba(245,158,11,0.35)",
+              background: "#fffbeb",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              gap: 12,
             }}
           >
-            Leave room
-          </button>
-        )}
-      </div>
-
-      {!room ? (
-        <div style={cardWrap}>
-          <h2 style={{ marginTop: 0 }}>Join your friends</h2>
-
-          <div style={row}>
-            <label style={label}>Your name</label>
-            <input style={input} value={name} onChange={(e) => setName(e.target.value)} placeholder="Add Your Name here…" />
-          </div>
-
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
-            <button style={btn} disabled={!name.trim() || !connected} onClick={() => socket.emit("room:create", { name: name.trim() })}>
-              Create room
-            </button>
-
-            <input style={{ ...input, width: 160 }} value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} placeholder="ROOM CODE" />
-
-            <button
-              style={btn}
-              disabled={!name.trim() || !code.trim() || !connected}
-              onClick={() => socket.emit("room:join", { code: code.trim(), name: name.trim() })}
-            >
-              Join room
-            </button>
-          </div>
-
-          {error && <div style={errorBox}>{error}</div>}
-        </div>
-      ) : (
-        <div style={cardWrap}>
-          {room.phase === "lobby" && lastRound && (
-            <div style={{ marginBottom: 16 }}>
-              <div
-                style={{
-                  padding: 14,
-                  borderRadius: 16,
-                  border: "1px solid rgba(17,24,39,0.12)",
-                  background:
-                    "linear-gradient(90deg, rgba(99,102,241,0.18), rgba(16,185,129,0.18), rgba(244,63,94,0.18))",
-                  backgroundSize: "220% 220%",
-                  animation: "shimmer 1400ms ease-in-out infinite alternate, winnerPulse 650ms ease-out",
-                }}
-              >
-                <div style={{ fontSize: 12, opacity: 0.75 }}>Winners</div>
-                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 6 }}>
-                  {totalWinner && (
-                    <div style={{ padding: "6px 10px", borderRadius: 999, background: "#ecfeff", border: "1px solid #cffafe", fontWeight: 950 }}>
-                      Total Winner: <span style={{ color: "#0e7490" }}>{totalWinner}</span>
-                    </div>
-                  )}
-                  {roundWinner && (
-                    <div style={{ padding: "6px 10px", borderRadius: 999, background: "#dcfce7", border: "1px solid #bbf7d0", fontWeight: 950 }}>
-                      Round Winner: <span style={{ color: "#166534" }}>{roundWinner}</span>
-                    </div>
-                  )}
-                </div>
-                <div style={{ marginTop: 8, fontSize: 12, opacity: 0.8 }}>Round complete — all cards revealed below.</div>
-              </div>
-
-              {room.roundBoard?.deltas?.length ? (
-                <div style={{ marginTop: 12 }}>
-                  <div style={{ fontSize: 12, opacity: 0.7 }}>Round scoreboard</div>
-                  <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
-                    {room.roundBoard.deltas.map((d) => (
-                      <div
-                        key={d.name}
-                        style={{
-                          display: "flex",
-                          justifyContent: "space-between",
-                          padding: 10,
-                          border: "1px solid #e5e7eb",
-                          borderRadius: 14,
-                        }}
-                      >
-                        <div style={{ fontWeight: 900 }}>{d.name}</div>
-                        <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
-                          <div style={{ fontWeight: 900, color: d.delta < 0 ? "#166534" : "#991b1b" }}>
-                            {d.delta >= 0 ? `+${d.delta}` : d.delta}
-                          </div>
-                          <div style={{ opacity: 0.7 }}>Total: {d.totalAfter}</div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-
-              {room.scoreboard?.length ? (
-                <div style={{ marginTop: 12 }}>
-                  <div style={{ fontSize: 12, opacity: 0.7 }}>Total scoreboard</div>
-                  <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
-                    {[...room.scoreboard]
-                      .sort((a, b) => a.score - b.score)
-                      .map((s) => (
-                        <div
-                          key={s.name}
-                          style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            padding: 10,
-                            border: "1px solid #e5e7eb",
-                            borderRadius: 14,
-                          }}
-                        >
-                          <div style={{ fontWeight: 900 }}>{s.name}</div>
-                          <div style={{ fontWeight: 900 }}>{s.score}</div>
-                        </div>
-                      ))}
-                  </div>
-                </div>
-              ) : null}
-
-              {lastRound.reveal && (
-                <div style={{ marginTop: 14 }}>
-                  <div style={{ fontSize: 12, opacity: 0.7 }}>Revealed hands</div>
-                  <div style={{ display: "grid", gap: 12, marginTop: 10 }}>
-                    {Object.entries(lastRound.reveal).map(([pname, cards]) => (
-                      <div key={pname} style={{ padding: 12, borderRadius: 16, border: "1px solid #e5e7eb" }}>
-                        <div style={{ fontWeight: 900, marginBottom: 10 }}>{pname}</div>
-                        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                          {(cards || []).map((c, idx) =>
-                            c ? <PlayingCard key={idx} slot={{ faceUp: true, card: c }} disabled={true} /> : <PlayingCard key={idx} slot={null} disabled={true} />
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+            <div style={{ display: "grid", gap: 4 }}>
+              <div style={{ fontWeight: 950 }}>Kargo was called by {room.kargo.calledByName || "a player"}.</div>
+              <div style={{ fontSize: 13, opacity: 0.85 }}>Finish the last round.</div>
             </div>
-          )}
+            <div style={{ fontSize: 12, opacity: 0.75 }}>Call stays active until the next draw.</div>
+          </div>
+        )}
 
+        <div style={cardWrap}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
             <div>
               <div style={{ fontSize: 12, opacity: 0.7 }}>Room code</div>
@@ -618,6 +477,30 @@ function AppInner() {
                     • Turn: <b>{turnName}</b> • Stage: <b>{turnStage}</b> • Power: <b>{powerMode}</b>
                   </>
                 )}
+              </div>
+
+              {/* PLAYERS list (Lobby names restored) */}
+              <div style={{ marginTop: 10, display: "grid", gap: 6 }}>
+                <div style={{ fontSize: 12, opacity: 0.7, fontWeight: 800 }}>Players</div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {players.map((p) => (
+                    <div
+                      key={p.id}
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: 999,
+                        border: "1px solid #e5e7eb",
+                        background: p.id === myId ? "#ecfeff" : "#f8fafc",
+                        fontSize: 12,
+                        fontWeight: 800,
+                      }}
+                    >
+                      {p.name}
+                      {p.id === room.hostId ? " (Host)" : ""}
+                      {p.id === room.turnPlayerId && room.phase === "playing" ? " • Turn" : ""}
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
 
@@ -641,14 +524,31 @@ function AppInner() {
                 <div style={{ fontSize: 13, opacity: 0.8 }}>
                   See <b>slot 0 & 1</b> now. After Ready, they hide.
                 </div>
+
+                {/* READY: show 2×2 matrix (bottom row = slot 0/1 shown once) */}
+                <div style={{ marginTop: 12, display: "grid", gap: 8 }}>
+                  <div style={{ fontSize: 12, opacity: 0.7 }}>
+                    Your 2×2 cards (slot <b>0</b> & <b>1</b> are shown once). Top row is hidden.
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(2, max-content)", gap: 10 }}>
+                    {[2, 3, 0, 1].map((idx) => {
+                      const s = me?.slots?.[idx] || null;
+                      const isBottomSeen = idx === 0 || idx === 1;
+                      const slot = s ? { ...s, faceUp: isBottomSeen } : null;
+                      return <PlayingCard key={idx} slot={slot} forceBack={!isBottomSeen} />;
+                    })}
+                  </div>
+                </div>
               </div>
             )}
           </div>
+        </div>
 
-          {/* TABLE FIRST */}
-          {room.phase === "playing" && (
-            <>
-              <div style={{ marginTop: 16, display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
+        {/* TABLE FIRST */}
+        {room.phase === "playing" && (
+          <>
+            <div style={cardWrap}>
+              <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
                 <div style={{ display: "grid", gap: 6 }}>
                   <div style={{ fontSize: 12, opacity: 0.7 }}>Deck</div>
                   <PlayingCard forceBack={true} disabled={true} />
@@ -656,193 +556,296 @@ function AppInner() {
 
                 <div style={{ display: "grid", gap: 6 }}>
                   <div style={{ fontSize: 12, opacity: 0.7 }}>Drawn</div>
-                  <PlayingCard
-                    slot={drawn ? { faceUp: true, card: drawn } : null}
-                    forceBack={!drawn}
-                    disabled={!drawn}
-                    onClick={() => {
-                      if (!amIAllowedToAct || turnStage !== "hasDrawn" || !drawn) return;
-                      socket.emit("turn:discardDrawn", { code: room.code });
-                    }}
-                  />
-                  <div style={{ fontSize: 11, opacity: 0.65 }}>Tap drawn to discard</div>
-                </div>
-
-                <div style={{ display: "grid", gap: 6 }}>
-                  <div style={{ fontSize: 12, opacity: 0.7 }}>Used pile</div>
-                  <UsedPileMini top2={usedTop2} count={usedCount} claimRank={claimRank} claimState={claimState} />
-                </div>
-
-                {peekModal?.card?.rank && (
-                  <div
-                    style={{
-                      padding: 12,
-                      borderRadius: 14,
-                      border: "1px solid rgba(17,24,39,0.15)",
-                      background: "rgba(255,255,255,0.95)",
-                      display: "grid",
-                      gap: 10,
-                      minWidth: 260,
-                    }}
-                  >
-                    <div>
-                      <div style={{ fontWeight: 900 }}>{peekModal.title}</div>
-                      <div style={{ fontSize: 12, opacity: 0.75 }}>Temporary reveal.</div>
-                    </div>
-                    <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                      <PlayingCard slot={{ faceUp: true, card: peekModal.card }} disabled={true} highlight={true} />
-                      {peekModal.qDecision && powerMode === "qAwaitDecision" ? (
-                        <div style={{ display: "flex", gap: 8 }}>
-                          <button
-                            style={btn}
-                            onClick={() => {
-                              setPeekModal(null);
-                              socket.emit("power:qDecision", { code: room.code, accept: true });
-                            }}
-                          >
-                            Swap
-                          </button>
-                          <button
-                            style={btnGhost}
-                            onClick={() => {
-                              setPeekModal(null);
-                              socket.emit("power:qDecision", { code: room.code, accept: false });
-                            }}
-                          >
-                            Don’t swap
-                          </button>
-                        </div>
-                      ) : (
-                        <button style={btnGhost} onClick={() => setPeekModal(null)}>
-                          Close
-                        </button>
-                      )}
-                    </div>
+                  <PlayingCard slot={drawn ? { faceUp: true, card: drawn } : { faceUp: false, card: null }} forceBack={!drawn} disabled />
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <button
+                      style={btn}
+                      disabled={!amIAllowedToAct || turnStage !== "needDraw"}
+                      onClick={() => {
+                        socket.emit("turn:draw", { code: room.code });
+                      }}
+                    >
+                      Draw
+                    </button>
+                    <button
+                      style={btnGhost}
+                      disabled={!amIAllowedToAct || turnStage !== "hasDrawn" || !drawn}
+                      onClick={() => socket.emit("turn:discard", { code: room.code })}
+                    >
+                      Discard drawn
+                    </button>
+                    <button
+                      style={btnGhost}
+                      disabled={!amIAllowedToAct || (!drawn && turnStage !== "hasDrawn")}
+                      onClick={() => socket.emit("kargo:call", { code: room.code })}
+                    >
+                      Call Kargo
+                    </button>
                   </div>
-                )}
-              </div>
-
-              <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                <button style={btn} disabled={!canDraw} onClick={() => socket.emit("turn:draw", { code: room.code })}>
-                  Draw
-                </button>
-
-                <button style={btnGhost} disabled={!canUsePower || powerMode !== "none"} onClick={() => socket.emit("power:useOnce", { code: room.code })}>
-                  Use Power
-                </button>
-
-                <button
-                  style={btnGhost}
-                  disabled={!amIAllowedToAct || turnStage !== "hasDrawn" || powerMode === "none"}
-                  onClick={() => socket.emit("power:cancel", { code: room.code })}
-                >
-                  Cancel Power
-                </button>
-
-                <button style={btnGhost} disabled={!canCallKargo} onClick={() => socket.emit("kargo:call", { code: room.code })}>
-                  Call KARGO
-                </button>
-
-                <button style={btn} disabled={!canEndTurn} onClick={() => socket.emit("turn:end", { code: room.code })}>
-                  End Turn
-                </button>
-
-                <div style={{ fontSize: 12, opacity: 0.75 }}>{amIAllowedToAct ? "Your turn" : `Waiting for ${turnName}…`}</div>
-              </div>
-
-              {claimRank && (
-                <div
-                  style={{
-                    marginTop: 10,
-                    padding: 10,
-                    borderRadius: 12,
-                    border: "1px solid #fecaca",
-                    background: "#fff1f2",
-                    color: "#991b1b",
-                    fontWeight: 800,
-                  }}
-                >
-                  Claim is LIVE (rank {claimRank}) — ends when the next player draws.
                 </div>
-              )}
-            </>
-          )}
 
-          {(room.phase === "ready" || room.phase === "playing") && (
-            <div style={{ marginTop: 18 }}>
-              <div style={{ fontSize: 12, opacity: 0.7 }}>
-                {room.phase === "ready" ? "Your cards (slot 0/1 visible once)" : "Your cards (tap)"}
+                <Stack top2={usedTop2} count={usedCount} showBackWhenEmpty={true} />
+
+                <div style={{ display: "grid", gap: 6, minWidth: 260 }}>
+                  <div style={{ fontSize: 12, opacity: 0.7, fontWeight: 900 }}>Activity</div>
+                  <div style={{ display: "grid", gap: 6 }}>
+                    {(room.activityLog || []).map((x, idx) => (
+                      <div
+                        key={`${x.ts}-${idx}`}
+                        style={{
+                          fontSize: 12,
+                          padding: "6px 8px",
+                          borderRadius: 12,
+                          background: "#f8fafc",
+                          border: "1px solid #e5e7eb",
+                        }}
+                      >
+                        {x.msg}
+                      </div>
+                    ))}
+                    {(!room.activityLog || room.activityLog.length === 0) && (
+                      <div style={{ fontSize: 12, opacity: 0.7 }}>No moves yet.</div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div style={cardWrap}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
+                <div style={{ fontWeight: 950, fontSize: 16 }}>Your cards</div>
+                <div style={{ fontSize: 12, opacity: 0.7 }}>
+                  Tap a slot to resolve your draw • Claim window rank: <b>{claimRank || "—"}</b>
+                </div>
               </div>
 
-              <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "repeat(2, max-content)", gap: 12 }}>
-                {slotDisplayOrder.map((idx) => {
-                  const slot = base4[idx] ?? null;
+              <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "repeat(2, max-content)", gap: 10 }}>
+                {/* 2×2 matrix order: top row slots 2/3, bottom row slots 0/1 */}
+                {[2, 3, 0, 1, ...(me?.slots?.slice(4).map((_, i) => i + 4) || [])].map((idx) => {
+                  const s = me?.slots?.[idx] || null;
+                  const isEmpty = !s?.card;
+                  if (isEmpty) {
+                    return (
+                      <div
+                        key={idx}
+                        style={{
+                          width: 86,
+                          height: 120,
+                          borderRadius: 16,
+                          border: "1px dashed rgba(17,24,39,0.25)",
+                          background: "rgba(255,255,255,0.6)",
+                          display: "grid",
+                          placeItems: "center",
+                          color: "rgba(17,24,39,0.55)",
+                          fontWeight: 900,
+                          fontSize: 12,
+                        }}
+                        onClick={() => onTapMySlot(idx)}
+                      >
+                        empty
+                      </div>
+                    );
+                  }
                   return (
                     <PlayingCard
                       key={idx}
-                      slot={slot}
-                      labelText={`slot ${idx}`}
-                      disabled={room.phase !== "playing" || !slot}
+                      slot={s}
+                      forceBack={!s.faceUp}
                       onClick={() => onTapMySlot(idx)}
+                      badge={`slot ${idx}`}
                     />
                   );
                 })}
               </div>
-
-              {extras.length > 0 && (
-                <div style={{ marginTop: 12 }}>
-                  <div style={{ fontSize: 12, opacity: 0.65, marginBottom: 8 }}>Penalty cards</div>
-                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                    {extras.map((_, i) => (
-                      <PlayingCard
-                        key={i}
-                        slot={null}
-                        forceBack={true}
-                        disabled={false}
-                        labelText={`slot ${i + 4}`}
-                        onClick={() => onTapMySlot(i + 4)}
-                      />
-                    ))}
-                  </div>
-                </div>
-              )}
             </div>
-          )}
 
-          {room.phase === "playing" && (
-            <div style={{ marginTop: 18, display: "grid", gap: 14 }}>
-              <div style={{ fontSize: 12, opacity: 0.7 }}>Opponents (tap only during power)</div>
-              {players
-                .filter((p) => p.id !== myId)
-                .map((p) => (
-                  <div key={p.id} style={{ padding: 12, borderRadius: 14, border: "1px solid #e5e7eb" }}>
-                    <div style={{ fontWeight: 900, marginBottom: 10 }}>{p.name}</div>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(8, max-content)", gap: 10 }}>
-                      {opponentSlots(p.cardCount).map((i) => (
-                        <PlayingCard
-                          key={i}
-                          slot={null}
-                          forceBack={true}
-                          disabled={!(powerMode === "otherPeekPick" || powerMode === "jPickOpponentCard" || powerMode === "qPickOpponentCard")}
-                          small={true}
-                          labelText={`slot ${i}`}
-                          onClick={() => onTapOtherSlot(p.id, i)}
-                        />
+            <div style={cardWrap}>
+              <div style={{ fontWeight: 950, fontSize: 16 }}>Other players</div>
+              <div style={{ marginTop: 10, display: "grid", gap: 14 }}>
+                {players
+                  .filter((p) => p.id !== myId)
+                  .map((p) => (
+                    <div key={p.id} style={{ border: "1px solid #e5e7eb", borderRadius: 14, padding: 12, background: "#f8fafc" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                        <div style={{ fontWeight: 950 }}>{p.name}</div>
+                        <div style={{ fontSize: 12, opacity: 0.7 }}>{p.id === room.turnPlayerId ? "Playing now" : ""}</div>
+                      </div>
+
+                      <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                        {/* IMPORTANT: for other players, show ONLY slots that actually have a card */}
+                        {p.slots
+                          .map((s, idx) => ({ s, idx }))
+                          .filter(({ s }) => !!s?.card)
+                          .map(({ s, idx }) => (
+                            <PlayingCard
+                              key={idx}
+                              slot={{ ...s, faceUp: false }}
+                              forceBack={true}
+                              onClick={() => onTapOtherSlot(p.id, idx)}
+                              badge={`slot ${idx}`}
+                            />
+                          ))}
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* scoreboards / end of round */}
+        {room.phase === "lobby" && lastRound && (
+          <div style={cardWrap}>
+            <div style={{ fontWeight: 950, fontSize: 16 }}>Last round</div>
+            <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
+              <div style={{ display: "grid", gap: 8 }}>
+                {lastRound.players?.map((p) => (
+                  <div
+                    key={p.id}
+                    style={{
+                      border: "1px solid #e5e7eb",
+                      borderRadius: 14,
+                      padding: 12,
+                      background: "white",
+                      display: "grid",
+                      gap: 10,
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+                      <div style={{ fontWeight: 950 }}>{p.name}</div>
+                      <div style={{ fontSize: 12, opacity: 0.7 }}>Total: {p.total}</div>
+                    </div>
+
+                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                      {(p.cards || []).map((card, idx) => (
+                        <PlayingCard key={idx} slot={{ faceUp: true, card }} />
                       ))}
                     </div>
                   </div>
                 ))}
-            </div>
-          )}
+              </div>
 
-          {error && <div style={{ ...errorBox, marginTop: 14 }}>{error}</div>}
-        </div>
-      )}
-    </div>
+              <div style={{ display: "grid", gap: 6 }}>
+                <div style={{ fontSize: 12, opacity: 0.7, fontWeight: 900 }}>Round deltas</div>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  {(room.roundBoard?.deltas || []).map((d, idx) => (
+                    <div
+                      key={idx}
+                      style={{
+                        padding: "8px 10px",
+                        borderRadius: 12,
+                        border: "1px solid #e5e7eb",
+                        background: "white",
+                        fontSize: 12,
+                        fontWeight: 900,
+                      }}
+                    >
+                      {d.name}: {d.delta > 0 ? `+${d.delta}` : d.delta}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div style={{ display: "grid", gap: 6 }}>
+                <div style={{ fontSize: 12, opacity: 0.7, fontWeight: 900 }}>Overall scoreboard</div>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  {(room.scoreboard || []).map((s, idx) => (
+                    <div
+                      key={idx}
+                      style={{
+                        padding: "8px 10px",
+                        borderRadius: 12,
+                        border: "1px solid #e5e7eb",
+                        background: "white",
+                        fontSize: 12,
+                        fontWeight: 900,
+                      }}
+                    >
+                      {s.name}: {s.score}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Peek modal */}
+        {peekModal?.card?.rank && (
+          <div
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(15,23,42,0.35)",
+              display: "grid",
+              placeItems: "center",
+              padding: 18,
+              zIndex: 70,
+            }}
+            onClick={() => setPeekModal(null)}
+          >
+            <div
+              style={{
+                padding: 12,
+                borderRadius: 14,
+                border: "1px solid rgba(17,24,39,0.15)",
+                background: "rgba(255,255,255,0.95)",
+                display: "grid",
+                gap: 10,
+                minWidth: 260,
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div>
+                <div style={{ fontWeight: 900 }}>{peekModal.title}</div>
+                <div style={{ fontSize: 12, opacity: 0.75 }}>Temporary reveal.</div>
+              </div>
+              <div style={{ display: "grid", placeItems: "center" }}>
+                <PlayingCard slot={{ faceUp: true, card: peekModal.card }} />
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+                {peekModal.q ? (
+                  <>
+                    <button
+                      style={btn}
+                      onClick={() => {
+                        setPeekModal(null);
+                        socket.emit("power:qDecision", { code: room.code, accept: true });
+                      }}
+                    >
+                      Swap
+                    </button>
+                    <button
+                      style={btnGhost}
+                      onClick={() => {
+                        setPeekModal(null);
+                        socket.emit("power:qDecision", { code: room.code, accept: false });
+                      }}
+                    >
+                      Don’t swap
+                    </button>
+                  </>
+                ) : (
+                  <button style={btnGhost} onClick={() => setPeekModal(null)}>
+                    Close
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {toast && (
+          <div style={toastWrap}>
+            <div style={toastCard}>{toast}</div>
+          </div>
+        )}
+      </div>
+    </ErrorBoundary>
   );
 }
 
-/* ---------- styles ---------- */
+/* styles (baseline UI — unchanged) */
 const page = {
   fontFamily: "system-ui, -apple-system, Segoe UI, Roboto",
   maxWidth: 1300,
@@ -858,22 +861,44 @@ const header = { display: "flex", justifyContent: "space-between", alignItems: "
 
 const cardWrap = { border: "1px solid #e5e7eb", borderRadius: 16, padding: 16, background: "white" };
 
-const row = { display: "grid", gap: 6 };
-const label = { fontSize: 13, opacity: 0.75 };
+const input = {
+  padding: "12px 12px",
+  borderRadius: 14,
+  border: "1px solid #e5e7eb",
+  fontSize: 14,
+  width: "100%",
+  outline: "none",
+};
 
-const input = { padding: "10px 12px", borderRadius: 12, border: "1px solid #d1d5db", width: 260, outline: "none" };
+const inputSm = {
+  padding: "12px 12px",
+  borderRadius: 14,
+  border: "1px solid #e5e7eb",
+  fontSize: 14,
+  width: 140,
+  outline: "none",
+  textTransform: "uppercase",
+  letterSpacing: 1,
+};
 
 const btn = {
   padding: "10px 12px",
   borderRadius: 12,
-  border: "1px solid #111827",
+  border: "1px solid rgba(17,24,39,0.2)",
   background: "#111827",
   color: "white",
   cursor: "pointer",
   fontWeight: 800,
 };
 
-const btnGhost = { padding: "10px 12px", borderRadius: 12, border: "1px solid #d1d5db", background: "white", cursor: "pointer", fontWeight: 800 };
+const btnGhost = {
+  padding: "10px 12px",
+  borderRadius: 12,
+  border: "1px solid #e5e7eb",
+  background: "white",
+  cursor: "pointer",
+  fontWeight: 800,
+};
 
 const errorBox = { padding: 10, borderRadius: 12, border: "1px solid #fecaca", background: "#fff1f2", color: "#9f1239", fontSize: 13 };
 
@@ -883,10 +908,7 @@ const toastCard = {
   padding: "10px 14px",
   borderRadius: 16,
   border: "1px solid rgba(17,24,39,0.15)",
-  background: "rgba(255,255,255,0.97)",
-  boxShadow: "0 14px 40px rgba(0,0,0,0.18)",
+  background: "rgba(255,255,255,0.95)",
   fontWeight: 900,
-  animation: "toast 1400ms ease-out",
-  minWidth: 240,
-  textAlign: "center",
+  boxShadow: "0 14px 30px rgba(15,23,42,0.18)",
 };
