@@ -1,820 +1,950 @@
+// server/index.js
 import express from "express";
 import http from "http";
 import cors from "cors";
 import { Server } from "socket.io";
 
-const PORT = process.env.PORT || 3001;
-const ORIGIN = process.env.CORS_ORIGIN || "*";
-
 const app = express();
-app.use(cors({ origin: ORIGIN }));
-
-app.get("/", (_req, res) => res.json({ ok: true, name: "kargo-server" }));
+app.use(cors());
+app.get("/", (_, res) => res.send("KARGO server running"));
 
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: ORIGIN, methods: ["GET", "POST"] },
-});
+const io = new Server(server, { cors: { origin: "*" } });
 
-/* ---------------- In-memory room state ---------------- */
-const rooms = new Map(); // code -> room
-
-function randCode() {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let out = "";
-  for (let i = 0; i < 4; i++) out += chars[Math.floor(Math.random() * chars.length)];
-  return out;
-}
+/* -------------------- Helpers -------------------- */
+const SUITS = ["S", "H", "D", "C"];
+const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
 
 function shuffle(arr) {
-  for (let i = arr.length - 1; i > 0; i--) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
+    [a[i], a[j]] = [a[j], a[i]];
   }
-  return arr;
+  return a;
+}
+function makeDecks(deckCount) {
+  const cards = [];
+  for (let d = 0; d < deckCount; d++) {
+    for (const s of SUITS) for (const r of RANKS) {
+      cards.push({ id: `${d}-${r}-${s}-${Math.random()}`, rank: r, suit: s });
+    }
+    cards.push({ id: `${d}-JOKER-0-${Math.random()}`, rank: "JOKER", suit: "J" });
+    cards.push({ id: `${d}-JOKER-1-${Math.random()}`, rank: "JOKER", suit: "J" });
+  }
+  return shuffle(cards);
 }
 
-function makeDeck() {
-  const suits = ["S", "H", "D", "C"];
-  const ranks = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
-  const deck = [];
-  for (const s of suits) for (const r of ranks) deck.push({ rank: r, suit: s });
-  deck.push({ rank: "JOKER", suit: "J" });
-  deck.push({ rank: "JOKER", suit: "J" });
-  return shuffle(deck);
+function isRedSuit(s) {
+  return s === "H" || s === "D";
+}
+function cardValue(card) {
+  if (!card) return 0;
+  if (card.rank === "JOKER") return 0;
+  if (card.rank === "A") return 1;
+  if (/^\d+$/.test(card.rank)) return Number(card.rank);
+  if (card.rank === "J") return 11;
+  if (card.rank === "Q") return 12;
+  if (card.rank === "K") return isRedSuit(card.suit) ? -1 : 13;
+  return 0;
+}
+function handTotal(hand) {
+  return (hand || []).filter(Boolean).reduce((sum, slot) => sum + cardValue(slot.card), 0);
+}
+function countCards(hand) {
+  return (hand || []).filter(Boolean).length;
+}
+function nowMs() {
+  return Date.now();
 }
 
-function makePlayer(id, name) {
-  return {
-    id,
-    name,
-    slots: [], // [{faceUp:boolean, card:{rank,suit} | null}]
-    cardCount: 4,
+function ensureDeck(room) {
+  if (room.deck.length > 0) return;
+  if (room.usedPile.length === 0) return;
+  room.deck = shuffle(room.usedPile);
+  room.usedPile = [];
+}
+
+/* -------------------- Rooms -------------------- */
+const rooms = new Map();
+
+function makeRoomCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let code = "";
+  for (let i = 0; i < 5; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
+}
+
+/* -------------------- Round end / scoring -------------------- */
+function snapshotHands(room) {
+  const snap = {};
+  for (const pid of room.order) {
+    const name = room.players.get(pid)?.name ?? "Unknown";
+    const hand = room.hands.get(pid) || [];
+    snap[name] = hand.map((s) => (s?.card ? { rank: s.card.rank, suit: s.card.suit } : null));
+  }
+  return snap;
+}
+
+function recordRoundBoard(room, deltas) {
+  room.roundBoard = { endedAt: nowMs(), deltas };
+}
+
+function resetToLobby(room) {
+  room.phase = "lobby";
+  room.deck = [];
+  room.usedPile = [];
+  room.claim = null;
+
+  room.hands = new Map();
+  room.turnIndex = 0;
+  room.drawnBy = new Map();
+  room.turnStageBy = new Map();
+
+  room.ready = new Map();
+
+  room.kargo = null;
+  room.powerState = new Map();
+}
+
+function endRoundAndScoreStandard(room, winnerPid, reason = "out") {
+  const winnerName = room.players.get(winnerPid)?.name ?? "Unknown";
+  const reveal = snapshotHands(room);
+
+  const deltas = [];
+  for (const pid of room.order) {
+    const name = room.players.get(pid)?.name ?? "Unknown";
+    const prev = room.scoreboard.get(name) ?? 0;
+
+    let delta = 0;
+    if (pid === winnerPid) delta = -20;
+    else delta = handTotal(room.hands.get(pid) || []);
+
+    room.scoreboard.set(name, prev + delta);
+    deltas.push({ name, delta, totalAfter: prev + delta });
+  }
+
+  for (const pid of room.order) {
+    const name = room.players.get(pid)?.name ?? "Unknown";
+    const st = room.stats.get(name) ?? { roundsPlayed: 0, roundsWon: 0 };
+    st.roundsPlayed += 1;
+    if (pid === winnerPid) st.roundsWon += 1;
+    room.stats.set(name, st);
+  }
+
+  room.lastRound = { winnerPid, winnerName, reason, endedAt: nowMs(), reveal };
+  recordRoundBoard(room, deltas);
+  resetToLobby(room);
+}
+
+function endRoundAndScoreKargoCompare(room) {
+  const k = room.kargo;
+  if (!k) return;
+
+  const reveal = snapshotHands(room);
+
+  const callerId = k.callerId;
+  const callerName = room.players.get(callerId)?.name ?? k.callerName ?? "Caller";
+  const callerTotal = handTotal(room.hands.get(callerId) || []);
+
+  const totals = room.order.map((pid) => ({
+    pid,
+    name: room.players.get(pid)?.name ?? "Unknown",
+    total: handTotal(room.hands.get(pid) || []),
+  }));
+
+  const breakers = totals.filter((x) => x.pid !== callerId && x.total <= callerTotal);
+  const deltas = [];
+
+  if (breakers.length > 0) {
+    for (const t of totals) {
+      const prev = room.scoreboard.get(t.name) ?? 0;
+      let delta = 0;
+
+      if (t.pid === callerId) delta = +40;
+      else if (t.total <= callerTotal) delta = -10;
+      else delta = 0;
+
+      room.scoreboard.set(t.name, prev + delta);
+      deltas.push({ name: t.name, delta, totalAfter: prev + delta });
+    }
+
+    for (const pid of room.order) {
+      const name = room.players.get(pid)?.name ?? "Unknown";
+      const st = room.stats.get(name) ?? { roundsPlayed: 0, roundsWon: 0 };
+      st.roundsPlayed += 1;
+      room.stats.set(name, st);
+    }
+
+    room.lastRound = {
+      winnerPid: callerId,
+      winnerName: callerName,
+      reason: "kargo_broken_by_total",
+      endedAt: nowMs(),
+      reveal,
+      kargoCallerTotal: callerTotal,
+    };
+    recordRoundBoard(room, deltas);
+    resetToLobby(room);
+    return;
+  }
+
+  for (const t of totals) {
+    const prev = room.scoreboard.get(t.name) ?? 0;
+    const delta = t.pid === callerId ? -20 : t.total;
+    room.scoreboard.set(t.name, prev + delta);
+    deltas.push({ name: t.name, delta, totalAfter: prev + delta });
+  }
+
+  for (const pid of room.order) {
+    const name = room.players.get(pid)?.name ?? "Unknown";
+    const st = room.stats.get(name) ?? { roundsPlayed: 0, roundsWon: 0 };
+    st.roundsPlayed += 1;
+    if (pid === callerId) st.roundsWon += 1;
+    room.stats.set(name, st);
+  }
+
+  room.lastRound = {
+    winnerPid: callerId,
+    winnerName: callerName,
+    reason: "kargo_success",
+    endedAt: nowMs(),
+    reveal,
+    kargoCallerTotal: callerTotal,
+  };
+  recordRoundBoard(room, deltas);
+  resetToLobby(room);
+}
+
+function maybeEndIfOut(room, pid) {
+  const hand = room.hands.get(pid) || [];
+  if (countCards(hand) !== 0) return false;
+
+  if (room.kargo && room.phase === "playing") {
+    const callerId = room.kargo.callerId;
+    const callerName = room.players.get(callerId)?.name ?? room.kargo.callerName ?? "Caller";
+    room.scoreboard.set(callerName, (room.scoreboard.get(callerName) ?? 0) + 40);
+    endRoundAndScoreStandard(room, pid, "kargo_broken_by_out");
+    return true;
+  }
+
+  endRoundAndScoreStandard(room, pid, "out");
+  return true;
+}
+
+/* -------------------- Claim helpers -------------------- */
+function openClaim(room, rank) {
+  room.claim = {
+    rank,
+    state: "open", // open -> won
+    winnerId: null,
+    winAt: null,
   };
 }
 
-function ensureRoom(code) {
-  const r = rooms.get(code);
-  if (!r) throw new Error("Room not found");
-  return r;
+/* -------------------- Turn & KARGO flow -------------------- */
+function startTurn(room, pid) {
+  room.turnStageBy.set(pid, "needDraw");
+  room.powerState.set(pid, { mode: "none" });
 }
 
-function top2(room) {
-  return room.used.slice(-2).reverse();
+function buildFinalTurns(room, callerId) {
+  const order = room.order;
+  const start = room.turnIndex;
+  const afterCallerIndex = (start + 1) % order.length;
+  const finalTurns = [];
+  for (let i = 0; i < order.length; i++) {
+    const pid = order[(afterCallerIndex + i) % order.length];
+    if (pid !== callerId) finalTurns.push(pid);
+  }
+  return finalTurns;
 }
 
-function endClaim(room) {
-  room.claim = { rank: null, state: null, claimedBy: null, claimedAt: null };
+function nextTurn(room) {
+  // ✅ IMPORTANT: do NOT clear claim here anymore.
+  // Claim stays open through end-turn and only clears when the next player draws.
+
+  const prevPid = room.order[room.turnIndex];
+  if (prevPid) room.turnStageBy.set(prevPid, "needDraw");
+
+  if (room.kargo) {
+    room.kargo.index += 1;
+    if (room.kargo.index >= room.kargo.finalTurns.length) {
+      endRoundAndScoreKargoCompare(room);
+      return;
+    }
+    const nextPid = room.kargo.finalTurns[room.kargo.index];
+    room.turnIndex = room.order.indexOf(nextPid);
+    startTurn(room, nextPid);
+    return;
+  }
+
+  room.turnIndex = (room.turnIndex + 1) % room.order.length;
+  startTurn(room, room.order[room.turnIndex]);
 }
 
-function log(room, msg) {
-  room.activityLog = room.activityLog || [];
-  room.activityLog.unshift({ t: Date.now(), msg });
-  if (room.activityLog.length > 12) room.activityLog = room.activityLog.slice(0, 12);
+function givePenaltyCard(room, pid) {
+  ensureDeck(room);
+  const c = room.deck.pop();
+  if (!c) return;
+  const hand = room.hands.get(pid) || [];
+  hand.push({ card: c }); // face-down in client
+  room.hands.set(pid, hand);
 }
 
-function publicRoom(room) {
+function actingGuard(room, socket) {
+  if (room.phase !== "playing") return "Not in playing phase";
+  if (room.kargo) {
+    const activeFinal = room.kargo.finalTurns[room.kargo.index] ?? null;
+    if (activeFinal !== socket.id) return "Not your final turn";
+  } else {
+    if (room.order[room.turnIndex] !== socket.id) return "Not your turn";
+  }
+  return null;
+}
+
+function consumeDrawnToUsed(room, pid, { makeClaim = false } = {}) {
+  const drawn = room.drawnBy.get(pid);
+  if (!drawn) return null;
+  room.usedPile.push(drawn);
+  room.drawnBy.delete(pid);
+  if (makeClaim) openClaim(room, drawn.rank);
+  return drawn;
+}
+
+/* -------------------- Ready gate / deal -------------------- */
+function dealHands(room) {
+  const n = room.order.length;
+  room.deckCount = n <= 5 ? 2 : 3;
+  room.deck = makeDecks(room.deckCount);
+  room.usedPile = [];
+  room.claim = null;
+
+  room.hands = new Map();
+  room.drawnBy = new Map();
+  room.turnStageBy = new Map();
+  room.ready = new Map();
+  room.powerState = new Map();
+
+  for (const pid of room.order) {
+    const c0 = room.deck.pop();
+    const c1 = room.deck.pop();
+    const c2 = room.deck.pop();
+    const c3 = room.deck.pop();
+    room.hands.set(pid, [{ card: c0 }, { card: c1 }, { card: c2 }, { card: c3 }]);
+
+    room.ready.set(pid, false);
+    room.turnStageBy.set(pid, "needDraw");
+    room.powerState.set(pid, { mode: "none" });
+  }
+
+  room.turnIndex = 0;
+  room.phase = "ready";
+}
+function allReady(room) {
+  for (const pid of room.order) if (!room.ready.get(pid)) return false;
+  return true;
+}
+function closeReadyGate(room) {
+  room.phase = "playing";
+  startTurn(room, room.order[room.turnIndex]);
+}
+
+/* -------------------- Public view -------------------- */
+function publicRoomView(room, viewerId) {
+  const usedTop2 = room.usedPile.slice(-2);
+
+  const k = room.kargo
+    ? {
+        callerId: room.kargo.callerId,
+        callerName: room.kargo.callerName,
+        activeFinalPlayerId: room.kargo.finalTurns[room.kargo.index] ?? null,
+      }
+    : null;
+
+  const readyState =
+    room.phase === "ready"
+      ? {
+          mine: !!room.ready.get(viewerId),
+          all: room.order.map((pid) => ({
+            id: pid,
+            name: room.players.get(pid)?.name ?? "Unknown",
+            ready: !!room.ready.get(pid),
+          })),
+        }
+      : null;
+
+  const ps = room.powerState.get(viewerId) || { mode: "none" };
+  const curPid = room.order[room.turnIndex] ?? null;
+  const stage = curPid ? room.turnStageBy.get(curPid) || "needDraw" : "needDraw";
+
   return {
     code: room.code,
     hostId: room.hostId,
-    phase: room.phase, // lobby | ready | playing
-    players: room.players.map((p) => ({
-      id: p.id,
-      name: p.name,
-      slots: p.slots, // presence known; faces hidden unless faceUp (self only)
-      cardCount: p.cardCount,
-    })),
-    turnPlayerId: room.turnPlayerId,
-    turnStage: room.turnStage, // needDraw | hasDrawn | awaitEnd
-    powerState: room.powerState, // { mode, ... }
-    usedTop2: room.usedTop2,
-    usedCount: room.usedCount,
-    claim: room.claim, // { rank, state, claimedBy, claimedAt }
-    scoreboard: room.scoreboard,
-    roundBoard: room.roundBoard,
-    lastRound: room.lastRound,
-    kargo: room.kargo, // null or { callerId, callerName, activeFinalPlayerId }
-    readyState: room.readyState,
-    activityLog: room.activityLog || [],
+    phase: room.phase,
+    turnPlayerId: curPid,
+    turnStage: stage,
+
+    usedTop2,
+    usedCount: room.usedPile.length,
+    claim: room.claim
+      ? {
+          rank: room.claim.rank,
+          state: room.claim.state,
+          winnerId: room.claim.winnerId ?? null,
+          winAt: room.claim.winAt ?? null,
+        }
+      : null,
+
+    lastRound: room.lastRound ?? null,
+    roundBoard: room.roundBoard ?? null,
+    kargo: k,
+    readyState,
+    powerState: ps,
+
+    players: room.order.map((pid) => {
+      const name = room.players.get(pid)?.name ?? "Unknown";
+      const hand = room.hands.get(pid) || [];
+      const viewerReady = !!room.ready.get(viewerId);
+
+      const slots = hand.map((slot, idx) => {
+        if (!slot) return null;
+
+        if (room.phase === "ready" && pid === viewerId && !viewerReady) {
+          if (idx === 0 || idx === 1) return { faceUp: true, card: slot.card };
+          return { faceUp: false, card: null };
+        }
+
+        return { faceUp: false, card: null };
+      });
+
+      return { id: pid, name, cardCount: countCards(hand), slots };
+    }),
+
+    scoreboard: Array.from(room.scoreboard.entries()).map(([name, score]) => ({ name, score })),
+    stats: Array.from(room.stats.entries()).map(([name, st]) => ({ name, ...st })),
   };
 }
 
-function emitRoomUpdate(code) {
-  const room = rooms.get(code);
-  if (!room) return;
-  io.to(code).emit("room:update", publicRoom(room));
+function broadcastRoom(room) {
+  for (const pid of room.order) io.to(pid).emit("room:update", publicRoomView(room, pid));
 }
 
-function reshuffleIfNeeded(room) {
-  if (room.deck.length > 0) return;
-  if (!room.used.length) throw new Error("Deck empty");
-  // reshuffle used pile back into deck, clear used
-  room.deck = shuffle([...room.used]);
-  room.used = [];
-  room.usedCount = 0;
-  room.usedTop2 = [];
-  endClaim(room);
-}
-
-function drawOne(room) {
-  reshuffleIfNeeded(room);
-  const c = room.deck.pop();
-  if (!c) throw new Error("Deck empty");
-  return c;
-}
-
-function setUsed(room, card) {
-  if (!card) return;
-  room.used.push(card);
-  room.usedCount = room.used.length;
-  room.usedTop2 = top2(room);
-
-  // open claim window for this rank (ends ONLY when next player draws)
-  room.claim = {
-    rank: card.rank,
-    state: "open", // open | won
-    claimedBy: null,
-    claimedAt: null,
-  };
-}
-
-function dealInitial(room) {
-  room.deck = makeDeck();
-  room.used = [];
-  room.usedTop2 = [];
-  room.usedCount = 0;
-
-  for (const p of room.players) {
-    p.slots = Array.from({ length: 4 }, () => ({ faceUp: false, card: null }));
-    for (let i = 0; i < 4; i++) {
-      p.slots[i] = { faceUp: false, card: drawOne(room) };
-    }
-    // show bottom two once in ready phase (slot 0/1)
-    p.slots[0].faceUp = true;
-    p.slots[1].faceUp = true;
-    p.cardCount = p.slots.length;
-  }
-
-  room.powerState = { mode: "none" };
-  room.turnPlayerId = room.players[0]?.id ?? null;
-  room.turnStage = "needDraw";
-  room.drawn = null;
-
-  endClaim(room);
-
-  room.scoreboard = room.players.map((p) => ({ name: p.name, score: 0 }));
-  room.roundBoard = { deltas: [] };
-  room.lastRound = null;
-
-  room.kargo = null;
-  room.readyState = { mine: false };
-
-  room.activityLog = [];
-  log(room, "Game started. Peek your bottom two once, then press Ready.");
-}
-
-function advanceTurn(room) {
-  if (!room.players.length) return;
-  const idx = room.players.findIndex((p) => p.id === room.turnPlayerId);
-  const nextIdx = idx >= 0 ? (idx + 1) % room.players.length : 0;
-  room.turnPlayerId = room.players[nextIdx].id;
-  room.turnStage = "needDraw";
-  room.powerState = { mode: "none" };
-  room.drawn = null;
-  // claim persists until next draw (rule) -> do not clear here
-}
-
-function firstEmptySlotIndex(player) {
-  return player.slots.findIndex((s) => !s?.card);
-}
-
-function givePenalty(room, player, reasonMsg) {
-  const card = drawOne(room);
-  const emptyIdx = firstEmptySlotIndex(player);
-  if (emptyIdx >= 0) {
-    player.slots[emptyIdx] = { faceUp: false, card };
-  } else {
-    player.slots.push({ faceUp: false, card });
-  }
-  player.cardCount = player.slots.length;
-  if (reasonMsg) log(room, reasonMsg);
-}
-
-function isPowerCard(card) {
-  return !!card && ["7", "8", "9", "10", "J", "Q"].includes(card.rank);
-}
-
-function blockIfKargoProtected(room, targetPlayerId) {
-  const callerId = room.kargo?.callerId;
-  return !!callerId && targetPlayerId === callerId;
-}
-
-/* ---------------- Socket handlers ---------------- */
+/* -------------------- Socket -------------------- */
 io.on("connection", (socket) => {
   socket.on("room:create", ({ name }) => {
-    try {
-      const code = randCode();
-      const room = {
-        code,
-        hostId: socket.id,
-        phase: "lobby",
-        players: [makePlayer(socket.id, String(name || "Player").slice(0, 24))],
-        deck: [],
-        used: [],
-        usedTop2: [],
-        usedCount: 0,
-        powerState: { mode: "none" },
-        turnPlayerId: null,
-        turnStage: "needDraw",
-        drawn: null,
-        claim: { rank: null, state: null, claimedBy: null, claimedAt: null },
-        scoreboard: [],
-        roundBoard: { deltas: [] },
-        lastRound: null,
-        kargo: null,
-        readyState: { mine: false },
-        activityLog: [],
-      };
-      rooms.set(code, room);
-      socket.join(code);
-      emitRoomUpdate(code);
-    } catch (e) {
-      socket.emit("error:msg", e?.message || "Failed to create room");
-    }
+    const code = makeRoomCode();
+    const room = {
+      code,
+      hostId: socket.id,
+      players: new Map(),
+      order: [],
+      scoreboard: new Map(),
+      stats: new Map(),
+
+      phase: "lobby",
+      deckCount: 2,
+      deck: [],
+      usedPile: [],
+      claim: null,
+
+      hands: new Map(),
+      turnIndex: 0,
+      drawnBy: new Map(),
+      turnStageBy: new Map(),
+
+      ready: new Map(),
+      kargo: null,
+      powerState: new Map(),
+
+      lastRound: null,
+      roundBoard: null,
+    };
+
+    rooms.set(code, room);
+
+    room.players.set(socket.id, { id: socket.id, name });
+    room.order.push(socket.id);
+    room.scoreboard.set(name, 0);
+    room.stats.set(name, { roundsPlayed: 0, roundsWon: 0 });
+
+    socket.join(code);
+    broadcastRoom(room);
   });
 
   socket.on("room:join", ({ code, name }) => {
-    try {
-      const c = String(code || "").toUpperCase().trim();
-      const room = ensureRoom(c);
+    const room = rooms.get(code);
+    if (!room) return socket.emit("error:msg", "Room not found");
+    if (room.phase !== "lobby") return socket.emit("error:msg", "Game already started");
+    if (room.order.length >= 8) return socket.emit("error:msg", "Room full (max 8)");
 
-      if (room.players.some((p) => p.id === socket.id)) {
-        socket.join(c);
-        emitRoomUpdate(c);
-        return;
-      }
+    room.players.set(socket.id, { id: socket.id, name });
+    room.order.push(socket.id);
+    if (!room.scoreboard.has(name)) room.scoreboard.set(name, 0);
+    if (!room.stats.has(name)) room.stats.set(name, { roundsPlayed: 0, roundsWon: 0 });
 
-      if (room.phase === "playing") throw new Error("Game already started");
-
-      room.players.push(makePlayer(socket.id, String(name || "Player").slice(0, 24)));
-      socket.join(c);
-      emitRoomUpdate(c);
-    } catch (e) {
-      socket.emit("error:msg", e?.message || "Failed to join room");
-    }
+    socket.join(code);
+    broadcastRoom(room);
   });
 
   socket.on("room:leave", ({ code }) => {
-    try {
-      const c = String(code || "").toUpperCase().trim();
-      const room = rooms.get(c);
-      if (!room) return;
+    const room = rooms.get(code);
+    if (!room) return;
 
-      socket.leave(c);
-      room.players = room.players.filter((p) => p.id !== socket.id);
+    room.players.delete(socket.id);
+    room.order = room.order.filter((id) => id !== socket.id);
+    room.hands.delete(socket.id);
+    room.drawnBy.delete(socket.id);
+    room.turnStageBy.delete(socket.id);
+    room.ready.delete(socket.id);
+    room.powerState.delete(socket.id);
 
-      if (room.hostId === socket.id) room.hostId = room.players[0]?.id ?? null;
-      if (room.turnPlayerId === socket.id) {
-        room.turnPlayerId = room.players[0]?.id ?? null;
-        room.turnStage = "needDraw";
-      }
-
-      if (!room.players.length) {
-        rooms.delete(c);
-        return;
-      }
-      emitRoomUpdate(c);
-    } catch (e) {
-      socket.emit("error:msg", e?.message || "Failed to leave room");
+    if (room.order.length === 0) {
+      rooms.delete(code);
+      return;
     }
+    if (room.hostId === socket.id) room.hostId = room.order[0];
+    room.turnIndex = Math.min(room.turnIndex, room.order.length - 1);
+
+    broadcastRoom(room);
   });
 
   socket.on("game:start", ({ code }) => {
-    try {
-      const c = String(code || "").toUpperCase().trim();
-      const room = ensureRoom(c);
-      if (room.hostId !== socket.id) throw new Error("Only host can start");
-      if (room.players.length < 2) throw new Error("Need at least 2 players");
+    const room = rooms.get(code);
+    if (!room) return;
+    if (room.hostId !== socket.id) return socket.emit("error:msg", "Only host can start");
+    if (room.order.length < 2) return socket.emit("error:msg", "Need at least 2 players");
 
-      room.phase = "ready";
-      dealInitial(room);
-      room._ready = new Set();
-      emitRoomUpdate(c);
-    } catch (e) {
-      socket.emit("error:msg", e?.message || "Failed to start game");
-    }
+    dealHands(room);
+    broadcastRoom(room);
   });
 
   socket.on("game:ready", ({ code }) => {
-    try {
-      const c = String(code || "").toUpperCase().trim();
-      const room = ensureRoom(c);
-      if (room.phase !== "ready") return;
+    const room = rooms.get(code);
+    if (!room || room.phase !== "ready") return;
+    if (!room.ready.has(socket.id)) return;
 
-      room._ready = room._ready || new Set();
-      room._ready.add(socket.id);
-
-      // hide slot 0/1 for that player (one-time peek)
-      const me = room.players.find((p) => p.id === socket.id);
-      if (me) {
-        if (me.slots[0]) me.slots[0].faceUp = false;
-        if (me.slots[1]) me.slots[1].faceUp = false;
-      }
-
-      if (room._ready.size >= room.players.length) {
-        room.phase = "playing";
-        room.turnPlayerId = room.players[0]?.id ?? null;
-        room.turnStage = "needDraw";
-        room.powerState = { mode: "none" };
-        log(room, "All players ready. Game on.");
-      }
-
-      emitRoomUpdate(c);
-    } catch (e) {
-      socket.emit("error:msg", e?.message || "Failed to ready");
-    }
+    room.ready.set(socket.id, true);
+    if (allReady(room)) closeReadyGate(room);
+    broadcastRoom(room);
   });
 
   socket.on("turn:draw", ({ code }) => {
-    try {
-      const c = String(code || "").toUpperCase().trim();
-      const room = ensureRoom(c);
-      if (room.phase !== "playing") return;
-      if (room.turnPlayerId !== socket.id) return;
-      if (room.turnStage !== "needDraw") return;
+    const room = rooms.get(code);
+    if (!room) return;
 
-      // claim ends ONLY when next player draws
-      endClaim(room);
+    const guard = actingGuard(room, socket);
+    if (guard) return socket.emit("error:msg", guard);
 
-      const card = drawOne(room);
-      room.drawn = card;
-      room.turnStage = "hasDrawn";
-      room.powerState = { mode: "none" };
+    const stage = room.turnStageBy.get(socket.id) || "needDraw";
+    if (stage !== "needDraw") return socket.emit("error:msg", "You cannot draw right now");
 
-      const turnP = room.players.find((p) => p.id === room.turnPlayerId);
-      log(room, `${turnP?.name || "Player"} drew a card.`);
-      socket.emit("turn:drawn", card);
-      emitRoomUpdate(c);
-    } catch (e) {
-      socket.emit("error:msg", e?.message || "Failed to draw");
-    }
-  });
+    // ✅ claim closes only when the next player draws
+    room.claim = null;
 
-  socket.on("turn:discardDrawn", ({ code }) => {
-    try {
-      const c = String(code || "").toUpperCase().trim();
-      const room = ensureRoom(c);
-      if (room.phase !== "playing") return;
-      if (room.turnPlayerId !== socket.id) return;
-      if (room.turnStage !== "hasDrawn") return;
+    ensureDeck(room);
+    const drawn = room.deck.pop();
+    if (!drawn) return socket.emit("error:msg", "Deck empty");
 
-      const card = room.drawn;
-      if (!card) return;
+    room.drawnBy.set(socket.id, drawn);
+    room.turnStageBy.set(socket.id, "hasDrawn");
+    room.powerState.set(socket.id, { mode: "none" });
 
-      setUsed(room, card);
-      room.drawn = null;
-      room.turnStage = "awaitEnd";
-      room.powerState = { mode: "none" };
-
-      const turnP = room.players.find((p) => p.id === socket.id);
-      log(room, `${turnP?.name || "Player"} discarded ${card.rank}.`);
-      emitRoomUpdate(c);
-    } catch (e) {
-      socket.emit("error:msg", e?.message || "Failed to discard");
-    }
+    socket.emit("turn:drawn", drawn);
+    broadcastRoom(room);
   });
 
   socket.on("turn:resolveDrawTap", ({ code, slotIndex }) => {
-    try {
-      const c = String(code || "").toUpperCase().trim();
-      const room = ensureRoom(c);
-      if (room.phase !== "playing") return;
-      if (room.turnPlayerId !== socket.id) return;
-      if (room.turnStage !== "hasDrawn") return;
-      if (room.powerState?.mode !== "none") return;
+    const room = rooms.get(code);
+    if (!room) return;
 
-      const me = room.players.find((p) => p.id === socket.id);
-      if (!me) return;
+    const guard = actingGuard(room, socket);
+    if (guard) return socket.emit("error:msg", guard);
 
-      const idx = Number(slotIndex);
-      if (!Number.isFinite(idx) || idx < 0 || idx >= me.slots.length) return;
+    const stage = room.turnStageBy.get(socket.id) || "needDraw";
+    if (stage !== "hasDrawn") return socket.emit("error:msg", "You must draw first");
 
-      const newCard = room.drawn;
-      if (!newCard) return;
+    const drawn = room.drawnBy.get(socket.id);
+    if (!drawn) return socket.emit("error:msg", "No drawn card");
 
-      const old = me.slots[idx]?.card || null;
+    const hand = room.hands.get(socket.id) || [];
+    const slot = hand[slotIndex];
+    if (!slot) return socket.emit("error:msg", "Empty slot");
 
-      me.slots[idx] = { faceUp: false, card: newCard };
-      me.cardCount = me.slots.length;
+    if (slot.card.rank === drawn.rank) {
+      room.usedPile.push(drawn);
+      room.usedPile.push(slot.card);
+      hand[slotIndex] = null;
+      room.drawnBy.delete(socket.id);
 
-      if (old) setUsed(room, old);
-
-      room.drawn = null;
-      room.turnStage = "awaitEnd";
-
-      log(room, `${me.name} placed a card into slot ${idx}.`);
-      emitRoomUpdate(c);
-    } catch (e) {
-      socket.emit("error:msg", e?.message || "Failed to place card");
+      if (maybeEndIfOut(room, socket.id)) return broadcastRoom(room);
+      room.turnStageBy.set(socket.id, "awaitEnd");
+      broadcastRoom(room);
+      return;
     }
+
+    const replaced = slot.card;
+    hand[slotIndex] = { card: drawn };
+    room.drawnBy.delete(socket.id);
+
+    room.usedPile.push(replaced);
+    openClaim(room, replaced.rank);
+
+    if (maybeEndIfOut(room, socket.id)) return broadcastRoom(room);
+    room.turnStageBy.set(socket.id, "awaitEnd");
+    broadcastRoom(room);
+  });
+
+  socket.on("turn:discardPair", ({ code, a, b }) => {
+    const room = rooms.get(code);
+    if (!room) return;
+
+    const guard = actingGuard(room, socket);
+    if (guard) return socket.emit("error:msg", guard);
+
+    const stage = room.turnStageBy.get(socket.id) || "needDraw";
+    if (stage !== "hasDrawn") return socket.emit("error:msg", "You must draw first to throw a pair");
+
+    const drawn = room.drawnBy.get(socket.id);
+    if (!drawn) return socket.emit("error:msg", "No drawn card");
+
+    const hand = room.hands.get(socket.id) || [];
+    const sa = hand[a];
+    const sb = hand[b];
+    if (!sa || !sb) return socket.emit("error:msg", "Both selected slots must have cards");
+    if (a === b) return socket.emit("error:msg", "Pick two different slots");
+
+    if (sa.card.rank !== sb.card.rank) {
+      givePenaltyCard(room, socket.id);
+      broadcastRoom(room);
+      return;
+    }
+
+    room.usedPile.push(sa.card);
+    room.usedPile.push(sb.card);
+
+    hand[a] = { card: drawn };
+    hand[b] = null;
+    room.drawnBy.delete(socket.id);
+
+    if (maybeEndIfOut(room, socket.id)) return broadcastRoom(room);
+    room.turnStageBy.set(socket.id, "awaitEnd");
+    broadcastRoom(room);
+  });
+
+  socket.on("turn:discardDrawn", ({ code }) => {
+    const room = rooms.get(code);
+    if (!room) return;
+
+    const guard = actingGuard(room, socket);
+    if (guard) return socket.emit("error:msg", guard);
+
+    const stage = room.turnStageBy.get(socket.id) || "needDraw";
+    if (stage !== "hasDrawn") return socket.emit("error:msg", "No drawn card to discard");
+
+    consumeDrawnToUsed(room, socket.id, { makeClaim: false });
+    room.turnStageBy.set(socket.id, "awaitEnd");
+    broadcastRoom(room);
   });
 
   socket.on("turn:end", ({ code }) => {
-    try {
-      const c = String(code || "").toUpperCase().trim();
-      const room = ensureRoom(c);
-      if (room.phase !== "playing") return;
-      if (room.turnPlayerId !== socket.id) return;
-      if (room.turnStage !== "awaitEnd") return;
+    const room = rooms.get(code);
+    if (!room) return;
 
-      const me = room.players.find((p) => p.id === socket.id);
-      log(room, `${me?.name || "Player"} ended their turn.`);
-      advanceTurn(room);
-      emitRoomUpdate(c);
-    } catch (e) {
-      socket.emit("error:msg", e?.message || "Failed to end turn");
-    }
+    const guard = actingGuard(room, socket);
+    if (guard) return socket.emit("error:msg", guard);
+
+    const stage = room.turnStageBy.get(socket.id) || "needDraw";
+    if (stage !== "awaitEnd") return socket.emit("error:msg", "Finish your action first");
+
+    room.powerState.set(socket.id, { mode: "none" });
+    nextTurn(room);
+    broadcastRoom(room);
   });
 
-  /* ---------------- Claims ---------------- */
+  // CLAIM: ANYONE including thrower; wrong rank => +1; 2nd within 0.2s => +1
   socket.on("used:claim", ({ code, slotIndex }) => {
-    try {
-      const c = String(code || "").toUpperCase().trim();
-      const room = ensureRoom(c);
-      if (room.phase !== "playing") return;
+    const room = rooms.get(code);
+    if (!room) return;
+    if (room.phase !== "playing") return;
 
-      const claimer = room.players.find((p) => p.id === socket.id);
-      if (!claimer) return;
+    const c = room.claim;
+    if (!c) return socket.emit("error:msg", "No claimable card right now");
 
-      const idx = Number(slotIndex);
-      if (!Number.isFinite(idx) || idx < 0 || idx >= claimer.slots.length) return;
-
-      const claim = room.claim;
-      if (!claim?.rank || claim.state === null) return;
-
-      const myCard = claimer.slots[idx]?.card;
-      if (!myCard) {
-        socket.emit("error:msg", "Empty slot.");
-        return;
+    if (c.state === "won") {
+      if (c.winAt && nowMs() - c.winAt <= 200) {
+        givePenaltyCard(room, socket.id);
+        broadcastRoom(room);
       }
-
-      // already won: enforce 0.2s penalty window
-      if (claim.state === "won") {
-        const now = Date.now();
-        if (claim.claimedAt && now - claim.claimedAt <= 200 && claim.claimedBy !== socket.id) {
-          givePenalty(room, claimer, `${claimer.name} was too slow (+1 card).`);
-          emitRoomUpdate(c);
-        }
-        return;
-      }
-
-      // open claim: must match rank
-      if (myCard.rank !== claim.rank) {
-        givePenalty(room, claimer, `${claimer.name} claimed wrong card (+1 card).`);
-        emitRoomUpdate(c);
-        return;
-      }
-
-      // successful claim: remove from hand
-      claimer.slots[idx] = { faceUp: false, card: null };
-      claimer.cardCount = claimer.slots.length;
-
-      // add their card into used (so top shows two cards sometimes)
-      room.used.push(myCard);
-      room.usedCount = room.used.length;
-      room.usedTop2 = top2(room);
-
-      // lock claim as won
-      room.claim = {
-        rank: claim.rank,
-        state: "won",
-        claimedBy: socket.id,
-        claimedAt: Date.now(),
-      };
-
-      log(room, `${claimer.name} claimed ${claim.rank}.`);
-      emitRoomUpdate(c);
-    } catch (e) {
-      socket.emit("error:msg", e?.message || "Claim failed");
+      return;
     }
+
+    const hand = room.hands.get(socket.id) || [];
+    const slot = hand[slotIndex];
+    if (!slot) return socket.emit("error:msg", "Empty slot");
+
+    if (slot.card.rank !== c.rank) {
+      givePenaltyCard(room, socket.id);
+      broadcastRoom(room);
+      return;
+    }
+
+    room.usedPile.push(slot.card);
+    hand[slotIndex] = null;
+
+    c.state = "won";
+    c.winnerId = socket.id;
+    c.winAt = nowMs();
+
+    if (maybeEndIfOut(room, socket.id)) return broadcastRoom(room);
+    broadcastRoom(room);
   });
 
-  /* ---------------- Kargo ---------------- */
+  /* -------------------- KARGO -------------------- */
   socket.on("kargo:call", ({ code }) => {
-    try {
-      const c = String(code || "").toUpperCase().trim();
-      const room = ensureRoom(c);
-      if (room.phase !== "playing") return;
-      if (room.kargo) return;
+    const room = rooms.get(code);
+    if (!room || room.phase !== "playing") return;
+    if (room.kargo) return socket.emit("error:msg", "KARGO already called");
 
-      const caller = room.players.find((p) => p.id === socket.id);
-      if (!caller) return;
+    const guard = actingGuard(room, socket);
+    if (guard) return socket.emit("error:msg", guard);
 
-      // Rule: cannot call Kargo if you have penalty cards (interpreted as extra slots >4 holding cards)
-      const hasPenaltySlots = caller.slots.length > 4 && caller.slots.slice(4).some((s) => s?.card);
-      if (hasPenaltySlots) {
-        socket.emit("error:msg", "You can't call Kargo with penalty cards.");
-        return;
-      }
+    consumeDrawnToUsed(room, socket.id, { makeClaim: false });
 
-      room.kargo = { callerId: socket.id, callerName: caller.name, activeFinalPlayerId: room.turnPlayerId };
-      log(room, `${caller.name} called KARGO! Finish the last round.`);
-      emitRoomUpdate(c);
-    } catch (e) {
-      socket.emit("error:msg", e?.message || "KARGO failed");
-    }
+    const callerName = room.players.get(socket.id)?.name ?? "Caller";
+    room.kargo = {
+      callerId: socket.id,
+      callerName,
+      calledAt: nowMs(),
+      finalTurns: buildFinalTurns(room, socket.id),
+      index: -1,
+    };
+
+    nextTurn(room);
+    broadcastRoom(room);
   });
 
-  /* ---------------- Powers ---------------- */
+  /* -------------------- Power (single use; power card becomes claimable until next draw) -------------------- */
   socket.on("power:useOnce", ({ code }) => {
-    try {
-      const c = String(code || "").toUpperCase().trim();
-      const room = ensureRoom(c);
-      if (room.phase !== "playing") return;
-      if (room.turnPlayerId !== socket.id) return;
-      if (room.turnStage !== "hasDrawn") return;
-      if (!room.drawn) return;
-      if (!isPowerCard(room.drawn)) return;
+    const room = rooms.get(code);
+    if (!room) return;
 
-      const card = room.drawn;
-      if (card.rank === "7" || card.rank === "8") {
-        room.powerState = { mode: "selfPeekPick" };
-        return emitRoomUpdate(c);
-      }
-      if (card.rank === "9" || card.rank === "10") {
-        room.powerState = { mode: "otherPeekPick" };
-        return emitRoomUpdate(c);
-      }
-      if (card.rank === "J") {
-        room.powerState = { mode: "jPickOpponentCard", j: { otherPlayerId: null, otherSlotIndex: null } };
-        return emitRoomUpdate(c);
-      }
-      if (card.rank === "Q") {
-        room.powerState = { mode: "qPickOpponentCard", q: { otherPlayerId: null, otherSlotIndex: null } };
-        return emitRoomUpdate(c);
-      }
-    } catch (e) {
-      socket.emit("error:msg", e?.message || "Power failed");
+    const guard = actingGuard(room, socket);
+    if (guard) return socket.emit("error:msg", guard);
+
+    const stage = room.turnStageBy.get(socket.id) || "needDraw";
+    if (stage !== "hasDrawn") return socket.emit("error:msg", "You must have a drawn card to use power");
+
+    const drawn = room.drawnBy.get(socket.id);
+    if (!drawn) return socket.emit("error:msg", "No drawn card");
+
+    const r = drawn.rank;
+    if (!["7", "8", "9", "10", "J", "Q"].includes(r)) return socket.emit("error:msg", "This drawn card has no power");
+
+    if (r === "7" || r === "8") {
+      room.powerState.set(socket.id, { mode: "selfPeekPick", drawnRank: r });
+      broadcastRoom(room);
+      return;
     }
-  });
-
-  socket.on("power:tapSelfCard", ({ code, slotIndex }) => {
-    try {
-      const c = String(code || "").toUpperCase().trim();
-      const room = ensureRoom(c);
-      if (room.phase !== "playing") return;
-      if (room.turnPlayerId !== socket.id) return;
-      if (room.turnStage !== "hasDrawn") return;
-      if (!room.drawn) return;
-      if (room.powerState?.mode !== "selfPeekPick") return;
-
-      const me = room.players.find((p) => p.id === socket.id);
-      if (!me) return;
-
-      const idx = Number(slotIndex);
-      if (!Number.isFinite(idx) || idx < 0 || idx >= me.slots.length) return;
-
-      const myCard = me.slots[idx]?.card;
-      if (!myCard) {
-        socket.emit("error:msg", "Empty slot.");
-        return;
-      }
-
-      socket.emit("power:result", { type: "peekSelf", card: myCard });
-
-      const usedPower = room.drawn;
-      room.drawn = null;
-      room.turnStage = "awaitEnd";
-      room.powerState = { mode: "none" };
-
-      setUsed(room, usedPower);
-      log(room, `${me.name} used a ${usedPower.rank} power.`);
-      emitRoomUpdate(c);
-    } catch (e) {
-      socket.emit("error:msg", e?.message || "Power failed");
+    if (r === "9" || r === "10") {
+      room.powerState.set(socket.id, { mode: "otherPeekPick", drawnRank: r });
+      broadcastRoom(room);
+      return;
     }
-  });
-
-  socket.on("power:tapOtherCard", ({ code, otherPlayerId, otherSlotIndex }) => {
-    try {
-      const c = String(code || "").toUpperCase().trim();
-      const room = ensureRoom(c);
-      if (room.phase !== "playing") return;
-      if (room.turnPlayerId !== socket.id) return;
-      if (room.turnStage !== "hasDrawn") return;
-      if (!room.drawn) return;
-
-      const mode = room.powerState?.mode;
-      if (!["otherPeekPick", "jPickOpponentCard", "qPickOpponentCard"].includes(mode)) return;
-
-      // Kargo protection: cannot peek/swap caller
-      if (blockIfKargoProtected(room, otherPlayerId)) {
-        socket.emit("error:msg", "That player's cards are protected after Kargo.");
-        return;
-      }
-
-      const other = room.players.find((p) => p.id === otherPlayerId);
-      if (!other) return;
-
-      const idx = Number(otherSlotIndex);
-      if (!Number.isFinite(idx) || idx < 0 || idx >= other.slots.length) return;
-
-      const otherCard = other.slots[idx]?.card;
-      if (!otherCard) {
-        socket.emit("error:msg", "Empty slot.");
-        return;
-      }
-
-      const me = room.players.find((p) => p.id === socket.id);
-
-      if (mode === "otherPeekPick") {
-        socket.emit("power:result", { type: "peekOther", card: otherCard });
-
-        const usedPower = room.drawn;
-        room.drawn = null;
-        room.turnStage = "awaitEnd";
-        room.powerState = { mode: "none" };
-        setUsed(room, usedPower);
-        log(room, `${me?.name || "Player"} used a ${usedPower.rank} power.`);
-        emitRoomUpdate(c);
-        return;
-      }
-
-      if (mode === "jPickOpponentCard") {
-        room.powerState = { mode: "jPickMyCard", j: { otherPlayerId, otherSlotIndex: idx } };
-        emitRoomUpdate(c);
-        return;
-      }
-
-      if (mode === "qPickOpponentCard") {
-        room.powerState = { mode: "qAwaitDecision", q: { otherPlayerId, otherSlotIndex: idx } };
-        socket.emit("power:result", { type: "qPeekThenDecide", card: otherCard });
-        emitRoomUpdate(c);
-        return;
-      }
-    } catch (e) {
-      socket.emit("error:msg", e?.message || "Power failed");
+    if (r === "J") {
+      room.powerState.set(socket.id, { mode: "jPickOpponentCard", drawnRank: r, target: null });
+      broadcastRoom(room);
+      return;
     }
-  });
-
-  socket.on("power:qDecision", ({ code, accept }) => {
-    try {
-      const c = String(code || "").toUpperCase().trim();
-      const room = ensureRoom(c);
-      if (room.phase !== "playing") return;
-      if (room.turnPlayerId !== socket.id) return;
-      if (room.turnStage !== "hasDrawn") return;
-      if (room.powerState?.mode !== "qAwaitDecision") return;
-
-      const me = room.players.find((p) => p.id === socket.id);
-      if (!me) return;
-
-      if (!accept) {
-        const usedPower = room.drawn;
-        room.drawn = null;
-        room.turnStage = "awaitEnd";
-        room.powerState = { mode: "none" };
-        setUsed(room, usedPower);
-        log(room, `${me.name} declined Q swap.`);
-        emitRoomUpdate(c);
-        return;
-      }
-
-      room.powerState = { mode: "qPickMyCard", q: room.powerState.q };
-      emitRoomUpdate(c);
-    } catch (e) {
-      socket.emit("error:msg", e?.message || "Decision failed");
-    }
-  });
-
-  socket.on("power:tapMyCardForJSwap", ({ code, mySlotIndex }) => {
-    try {
-      const c = String(code || "").toUpperCase().trim();
-      const room = ensureRoom(c);
-      if (room.phase !== "playing") return;
-      if (room.turnPlayerId !== socket.id) return;
-      if (room.turnStage !== "hasDrawn") return;
-      if (room.powerState?.mode !== "jPickMyCard") return;
-
-      const me = room.players.find((p) => p.id === socket.id);
-      if (!me) return;
-
-      const j = room.powerState.j;
-      const other = room.players.find((p) => p.id === j.otherPlayerId);
-      if (!other) return;
-
-      const myIdx = Number(mySlotIndex);
-      if (!Number.isFinite(myIdx) || myIdx < 0 || myIdx >= me.slots.length) return;
-
-      const otherIdx = Number(j.otherSlotIndex);
-      if (!Number.isFinite(otherIdx) || otherIdx < 0 || otherIdx >= other.slots.length) return;
-
-      const myCard = me.slots[myIdx]?.card;
-      const otherCard = other.slots[otherIdx]?.card;
-      if (!myCard || !otherCard) {
-        socket.emit("error:msg", "Empty card slot.");
-        return;
-      }
-
-      me.slots[myIdx] = { faceUp: false, card: otherCard };
-      other.slots[otherIdx] = { faceUp: false, card: myCard };
-
-      const usedPower = room.drawn;
-      room.drawn = null;
-      room.turnStage = "awaitEnd";
-      room.powerState = { mode: "none" };
-      setUsed(room, usedPower);
-
-      // J: activity log only “A swapped with B” (no slots, no cards)
-      socket.emit("swap:notice", { kind: "J", withPlayer: other.name, message: `Swapped with ${other.name}` });
-      log(room, `${me.name} swapped with ${other.name} (J).`);
-
-      emitRoomUpdate(c);
-    } catch (e) {
-      socket.emit("error:msg", e?.message || "J swap failed");
-    }
-  });
-
-  socket.on("power:tapMyCardForQSwap", ({ code, mySlotIndex }) => {
-    try {
-      const c = String(code || "").toUpperCase().trim();
-      const room = ensureRoom(c);
-      if (room.phase !== "playing") return;
-      if (room.turnPlayerId !== socket.id) return;
-      if (room.turnStage !== "hasDrawn") return;
-      if (room.powerState?.mode !== "qPickMyCard") return;
-
-      const me = room.players.find((p) => p.id === socket.id);
-      if (!me) return;
-
-      const q = room.powerState.q;
-      const other = room.players.find((p) => p.id === q.otherPlayerId);
-      if (!other) return;
-
-      const myIdx = Number(mySlotIndex);
-      if (!Number.isFinite(myIdx) || myIdx < 0 || myIdx >= me.slots.length) return;
-
-      const otherIdx = Number(q.otherSlotIndex);
-      if (!Number.isFinite(otherIdx) || otherIdx < 0 || otherIdx >= other.slots.length) return;
-
-      const myCard = me.slots[myIdx]?.card;
-      const otherCard = other.slots[otherIdx]?.card;
-      if (!myCard || !otherCard) {
-        socket.emit("error:msg", "Empty card slot.");
-        return;
-      }
-
-      me.slots[myIdx] = { faceUp: false, card: otherCard };
-      other.slots[otherIdx] = { faceUp: false, card: myCard };
-
-      const usedPower = room.drawn;
-      room.drawn = null;
-      room.turnStage = "awaitEnd";
-      room.powerState = { mode: "none" };
-      setUsed(room, usedPower);
-
-      // Q: can show slot numbers swapped but NEVER card faces
-      socket.emit("swap:notice", {
-        kind: "Q",
-        withPlayer: other.name,
-        message: `Swapped with ${other.name} (Q)`,
-        mySlot: myIdx,
-        otherSlot: otherIdx,
-      });
-      log(room, `${me.name} swapped with ${other.name} (Q).`);
-
-      emitRoomUpdate(c);
-    } catch (e) {
-      socket.emit("error:msg", e?.message || "Q swap failed");
+    if (r === "Q") {
+      room.powerState.set(socket.id, { mode: "qPickOpponentCard", drawnRank: r, target: null });
+      broadcastRoom(room);
+      return;
     }
   });
 
   socket.on("power:cancel", ({ code }) => {
-    try {
-      const c = String(code || "").toUpperCase().trim();
-      const room = ensureRoom(c);
-      room.powerState = { mode: "none" };
-      emitRoomUpdate(c);
-    } catch (e) {
-      socket.emit("error:msg", e?.message || "Cancel failed");
+    const room = rooms.get(code);
+    if (!room) return;
+
+    const guard = actingGuard(room, socket);
+    if (guard) return socket.emit("error:msg", guard);
+
+    room.powerState.set(socket.id, { mode: "none" });
+    broadcastRoom(room);
+  });
+
+  socket.on("power:tapSelfCard", ({ code, slotIndex }) => {
+    const room = rooms.get(code);
+    if (!room) return;
+
+    const ps = room.powerState.get(socket.id) || { mode: "none" };
+    if (ps.mode !== "selfPeekPick") return socket.emit("error:msg", "Not in 7/8 mode");
+
+    const hand = room.hands.get(socket.id) || [];
+    const slot = hand[slotIndex];
+    if (!slot || !slot.card) return socket.emit("error:msg", "Empty slot");
+
+    socket.emit("power:result", { type: "peekSelf", card: slot.card });
+
+    // power used => move drawn power card to used, open claim
+    consumeDrawnToUsed(room, socket.id, { makeClaim: true });
+
+    room.turnStageBy.set(socket.id, "awaitEnd");
+    room.powerState.set(socket.id, { mode: "none" });
+    broadcastRoom(room);
+  });
+
+  socket.on("power:tapOtherCard", ({ code, otherPlayerId, otherSlotIndex }) => {
+    const room = rooms.get(code);
+    if (!room) return;
+
+    const ps = room.powerState.get(socket.id) || { mode: "none" };
+
+    const otherHand = room.hands.get(otherPlayerId) || [];
+    const otherSlot = otherHand[otherSlotIndex];
+    if (!otherSlot || !otherSlot.card) return socket.emit("error:msg", "Other slot empty");
+
+    if (ps.mode === "otherPeekPick") {
+      socket.emit("power:result", { type: "peekOther", card: otherSlot.card });
+
+      consumeDrawnToUsed(room, socket.id, { makeClaim: true });
+
+      room.turnStageBy.set(socket.id, "awaitEnd");
+      room.powerState.set(socket.id, { mode: "none" });
+      broadcastRoom(room);
+      return;
     }
+
+    if (ps.mode === "jPickOpponentCard") {
+      room.powerState.set(socket.id, { ...ps, mode: "jPickMyCard", target: { otherPlayerId, otherSlotIndex } });
+      broadcastRoom(room);
+      return;
+    }
+
+    if (ps.mode === "qPickOpponentCard") {
+      socket.emit("power:result", { type: "qPeekThenDecide", card: otherSlot.card });
+      room.powerState.set(socket.id, { ...ps, mode: "qAwaitDecision", target: { otherPlayerId, otherSlotIndex } });
+      broadcastRoom(room);
+      return;
+    }
+
+    socket.emit("error:msg", "Not targeting another player right now");
+  });
+
+  function emitSwapNotice(room, aId, aSlot, aNewCard, bId, bSlot, bNewCard, kind) {
+    const aName = room.players.get(aId)?.name ?? "Player";
+    const bName = room.players.get(bId)?.name ?? "Player";
+    io.to(aId).emit("swap:notice", { kind, withPlayer: bName, mySlot: aSlot, newCard: aNewCard });
+    io.to(bId).emit("swap:notice", { kind, withPlayer: aName, mySlot: bSlot, newCard: bNewCard });
+  }
+
+  socket.on("power:tapMyCardForJSwap", ({ code, mySlotIndex }) => {
+    const room = rooms.get(code);
+    if (!room) return;
+
+    const ps = room.powerState.get(socket.id) || { mode: "none" };
+    if (ps.mode !== "jPickMyCard" || !ps.target) return socket.emit("error:msg", "Pick opponent card first");
+
+    const myHand = room.hands.get(socket.id) || [];
+    const mySlot = myHand[mySlotIndex];
+    if (!mySlot || !mySlot.card) return socket.emit("error:msg", "Your slot empty");
+
+    const { otherPlayerId, otherSlotIndex } = ps.target;
+    const otherHand = room.hands.get(otherPlayerId) || [];
+    const otherSlot = otherHand[otherSlotIndex];
+    if (!otherSlot || !otherSlot.card) return socket.emit("error:msg", "Other slot empty");
+
+    const aOld = mySlot.card;
+    const bOld = otherSlot.card;
+
+    mySlot.card = bOld;
+    otherSlot.card = aOld;
+
+    // notify both players which of THEIR slot changed, and what card replaced it
+    emitSwapNotice(room, socket.id, mySlotIndex, mySlot.card, otherPlayerId, otherSlotIndex, otherSlot.card, "J");
+
+    consumeDrawnToUsed(room, socket.id, { makeClaim: true });
+
+    room.turnStageBy.set(socket.id, "awaitEnd");
+    room.powerState.set(socket.id, { mode: "none" });
+    broadcastRoom(room);
+  });
+
+  socket.on("power:qDecision", ({ code, accept }) => {
+    const room = rooms.get(code);
+    if (!room) return;
+
+    const ps = room.powerState.get(socket.id) || { mode: "none" };
+    if (ps.mode !== "qAwaitDecision" || !ps.target) return socket.emit("error:msg", "No Q decision pending");
+
+    if (!accept) {
+      consumeDrawnToUsed(room, socket.id, { makeClaim: true });
+
+      room.turnStageBy.set(socket.id, "awaitEnd");
+      room.powerState.set(socket.id, { mode: "none" });
+      broadcastRoom(room);
+      return;
+    }
+
+    room.powerState.set(socket.id, { ...ps, mode: "qPickMyCard" });
+    broadcastRoom(room);
+  });
+
+  socket.on("power:tapMyCardForQSwap", ({ code, mySlotIndex }) => {
+    const room = rooms.get(code);
+    if (!room) return;
+
+    const ps = room.powerState.get(socket.id) || { mode: "none" };
+    if (ps.mode !== "qPickMyCard" || !ps.target) return socket.emit("error:msg", "Pick opponent first, then accept");
+
+    const myHand = room.hands.get(socket.id) || [];
+    const mySlot = myHand[mySlotIndex];
+    if (!mySlot || !mySlot.card) return socket.emit("error:msg", "Your slot empty");
+
+    const { otherPlayerId, otherSlotIndex } = ps.target;
+    const otherHand = room.hands.get(otherPlayerId) || [];
+    const otherSlot = otherHand[otherSlotIndex];
+    if (!otherSlot || !otherSlot.card) return socket.emit("error:msg", "Other slot empty");
+
+    const aOld = mySlot.card;
+    const bOld = otherSlot.card;
+
+    mySlot.card = bOld;
+    otherSlot.card = aOld;
+
+    emitSwapNotice(room, socket.id, mySlotIndex, mySlot.card, otherPlayerId, otherSlotIndex, otherSlot.card, "Q");
+
+    consumeDrawnToUsed(room, socket.id, { makeClaim: true });
+
+    room.turnStageBy.set(socket.id, "awaitEnd");
+    room.powerState.set(socket.id, { mode: "none" });
+    broadcastRoom(room);
   });
 
   socket.on("disconnect", () => {
     for (const [code, room] of rooms.entries()) {
-      const had = room.players.some((p) => p.id === socket.id);
-      if (!had) continue;
+      if (!room.players.has(socket.id)) continue;
 
-      room.players = room.players.filter((p) => p.id !== socket.id);
-      if (room.hostId === socket.id) room.hostId = room.players[0]?.id ?? null;
-      if (room.turnPlayerId === socket.id) room.turnPlayerId = room.players[0]?.id ?? null;
+      room.players.delete(socket.id);
+      room.order = room.order.filter((id) => id !== socket.id);
+      room.hands.delete(socket.id);
+      room.drawnBy.delete(socket.id);
+      room.turnStageBy.delete(socket.id);
+      room.ready.delete(socket.id);
+      room.powerState.delete(socket.id);
 
-      if (!room.players.length) rooms.delete(code);
-      else emitRoomUpdate(code);
+      if (room.order.length === 0) {
+        rooms.delete(code);
+        continue;
+      }
+      if (room.hostId === socket.id) room.hostId = room.order[0];
+      room.turnIndex = Math.min(room.turnIndex, room.order.length - 1);
+
+      broadcastRoom(room);
     }
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`kargo-server listening on :${PORT}`);
-});
+const PORT = process.env.PORT || 8080;
+server.listen(PORT, () => console.log(`KARGO server listening on :${PORT}`));
