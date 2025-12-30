@@ -5,115 +5,138 @@ import PeekModal from "./PeekModal";
 import { useRoom } from "../hooks/useRoom";
 
 /**
- * GamePilot (Real MVP Hookup)
- * - Preserves your v1.0 Pilot UI look & structure
- * - Adds Create / Join / Ready
- * - Renders authoritative room state
- * - Keeps PeekModal behavior
+ * GamePilot.jsx — Real Multiplayer MVP UI
+ * - Vite client on Vercel
+ * - Socket.io server on Render
+ * - Works with actions:
+ *   READY, DRAW, SWAP_WITH_DISCARD, SWAP_DRAWN_WITH_HAND, DISCARD_DRAWN
+ * - Shows drawn card in the center (always visible slot)
+ * - Keeps your 2x2 hand grid + PeekModal + ActivityMonitor
  */
 export default function GamePilot() {
   const room = useRoom();
 
-  // --- UI / lobby inputs ---
+  // Lobby inputs
   const [name, setName] = useState("Player");
   const [roomCode, setRoomCode] = useState("");
 
-  // --- local-only UI helpers ---
-  const [peek, setPeek] = useState(null);
+  // UI state
   const [selectedCardId, setSelectedCardId] = useState(null);
+  const [peekCard, setPeekCard] = useState(null);
 
-  // "Bottom two shown once" behavior (client-side MVP):
-  const [initialReveal, setInitialReveal] = useState(false);
-  const [initialRevealUsed, setInitialRevealUsed] = useState(false);
+  // “Bottom two revealed once” effect (client-side visual only)
+  const [initialRevealActive, setInitialRevealActive] = useState(false);
+  const [initialRevealUsedForHandKey, setInitialRevealUsedForHandKey] = useState(null);
 
-  // --- derive "me" + my hand from public state ---
+  const state = room.state;
+
   const { me, myHand, opponents } = useMemo(() => {
-    const state = room.state;
-    if (!state || !room.playerId) return { me: null, myHand: [], opponents: [] };
+    const s = state;
+    if (!s || !room.playerId) return { me: null, myHand: [], opponents: [] };
 
-    const me = state.players?.find((p) => p.id === room.playerId) || null;
-    const others = (state.players || []).filter((p) => p.id !== room.playerId);
+    const me = s.players?.find((p) => p.id === room.playerId) || null;
+    const others = (s.players || []).filter((p) => p.id !== room.playerId);
 
-    return {
-      me,
-      myHand: me?.hand || [],
-      opponents: others,
-    };
-  }, [room.state, room.playerId]);
+    return { me, myHand: me?.hand || [], opponents: others };
+  }, [state, room.playerId]);
 
-  // Trigger initial reveal once when we first receive a 4-card hand in a started phase
-  useEffect(() => {
-    if (!room.state) return;
-    if (initialRevealUsed) return;
+  const deckCount = state?.deck?.count ?? state?.deck?.length ?? 0;
+  const discardTop = state?.discard?.[0] || null; // server sends top-only
+  const drawn = state?.drawnCard || null;
 
-    const hasFour = Array.isArray(myHand) && myHand.length === 4;
-    const started = room.state.phase && room.state.phase !== "lobby";
+  const isMyTurn = state?.turnPlayerId === room.playerId;
+  const turnStep = state?.turnStep || "—";
+  const phase = state?.phase || "—";
 
-    if (started && hasFour) {
-      setInitialReveal(true);
-      setInitialRevealUsed(true);
-      const t = setTimeout(() => setInitialReveal(false), 2200);
-      return () => clearTimeout(t);
-    }
-  }, [room.state, myHand, initialRevealUsed]);
+  // Enable/disable controls
+  const canReady = phase === "lobby" && !!room.roomId && !!room.playerId;
+  const canDraw = phase === "turn" && isMyTurn && turnStep === "draw";
+  const canSwapDiscard =
+    phase === "turn" && isMyTurn && turnStep === "draw" && !!discardTop && !!selectedCardId;
+  const canSwapDrawn =
+    phase === "turn" && isMyTurn && turnStep === "play" && !!drawn && !!selectedCardId;
+  const canDiscardDrawn = phase === "turn" && isMyTurn && turnStep === "play" && !!drawn;
 
   // Keep selection valid
   useEffect(() => {
     if (!selectedCardId) return;
-    if (!myHand.some((c) => c.id === selectedCardId)) setSelectedCardId(null);
+    if (!myHand.some((c) => c?.id === selectedCardId)) setSelectedCardId(null);
   }, [myHand, selectedCardId]);
 
-  // --- actions ---
-  async function onCreate() {
-    const res = await room.createRoom(name?.trim() || "Player");
-    if (!res?.ok) alert(res?.error || "Failed to create room");
+  // Trigger initial reveal once per new hand (simple heuristic)
+  useEffect(() => {
+    if (!state || phase === "lobby") return;
+    if (!myHand || myHand.length !== 4) return;
+
+    // Create a stable-ish hand key from card ids
+    const handKey = myHand.map((c) => c?.id).join("|");
+    if (!handKey) return;
+
+    if (initialRevealUsedForHandKey !== handKey) {
+      setInitialRevealUsedForHandKey(handKey);
+      setInitialRevealActive(true);
+      const t = setTimeout(() => setInitialRevealActive(false), 2200);
+      return () => clearTimeout(t);
+    }
+  }, [state, phase, myHand, initialRevealUsedForHandKey]);
+
+  async function safeCall(promise, fallbackMsg) {
+    try {
+      const res = await promise;
+      if (!res?.ok) alert(res?.error || fallbackMsg);
+      return res;
+    } catch (e) {
+      alert(e?.message || fallbackMsg);
+      return null;
+    }
   }
 
-  async function onJoin() {
-    const code = roomCode.trim();
-    if (!code) return alert("Enter a room code");
-    const res = await room.joinRoom(code, name?.trim() || "Player");
-    if (!res?.ok) alert(res?.error || "Failed to join room");
+  async function onCreateRoom() {
+    await safeCall(room.createRoom(name?.trim() || "Player"), "Failed to create room");
+  }
+
+  async function onJoinRoom() {
+    const code = (roomCode || "").trim();
+    if (!code) return alert("Enter a 6-digit room code");
+    await safeCall(room.joinRoom(code, name?.trim() || "Player"), "Failed to join room");
   }
 
   async function send(action) {
-    const res = await room.action(action);
-    if (!res?.ok) alert(res?.error || "Action failed");
+    await safeCall(room.action(action), "Action failed");
   }
 
-  function revealCard(card) {
-    // Keep your PeekModal flow
-    setPeek(card);
+  function onCardClick(card) {
+    if (!card?.id) return;
+    setSelectedCardId(card.id);
+    setPeekCard(card);
   }
 
-  const state = room.state;
+  // Hide UI cards for opponents (server already hides by sending {hidden:true})
+  const opponentNames = opponents.map((p) => p.name).filter(Boolean).join(" • ");
 
-  // Public discard top card (server sends only top in MVP)
-  const discardTop = state?.discard?.[0] || null;
-
-  // Deck count (server sends {count})
-  const deckCount = state?.deck?.count ?? 0;
-
-  const isMyTurn = state?.turnPlayerId && state.turnPlayerId === room.playerId;
-  const canReady = state?.phase === "lobby" && room.roomId && room.playerId;
-  const canDraw = isMyTurn && state?.turnStep === "draw";
-  const canPlay = isMyTurn && state?.turnStep === "play";
-
-  // --- UI ---
   return (
     <div style={styles.bg}>
       <div style={styles.wrap}>
         {/* Header */}
         <div style={styles.header}>
-          <div style={styles.title}>KARGO — Pilot</div>
-          <div style={styles.chip}>
-            {room.connected ? "Connected" : "Offline"}
-            {room.roomId ? ` • Room: ${room.roomId}` : ""}
+          <div>
+            <div style={styles.title}>KARGO — MVP</div>
+            <div style={styles.sub}>
+              {room.connected ? "Connected" : "Offline"}{" "}
+              {room.roomId ? `• Room: ${room.roomId}` : ""}
+            </div>
+          </div>
+
+          <div style={styles.pills}>
+            <span style={styles.pill}>Phase: {phase}</span>
+            <span style={styles.pill}>
+              {phase === "turn" ? (isMyTurn ? `Your turn • ${turnStep}` : `Waiting • ${turnStep}`) : "—"}
+            </span>
           </div>
         </div>
 
-        {/* Lobby / Room Controls */}
-        <div style={styles.lobbyBar}>
+        {/* Lobby Controls */}
+        <div style={styles.lobby}>
           <input
             style={styles.input}
             value={name}
@@ -123,7 +146,7 @@ export default function GamePilot() {
 
           {!room.roomId ? (
             <>
-              <button style={styles.btn} onClick={onCreate} disabled={!room.connected}>
+              <button style={styles.btn} onClick={onCreateRoom} disabled={!room.connected}>
                 Create Room
               </button>
 
@@ -131,9 +154,10 @@ export default function GamePilot() {
                 style={styles.input}
                 value={roomCode}
                 onChange={(e) => setRoomCode(e.target.value)}
-                placeholder="Room code"
+                placeholder="Room code (6 digits)"
+                inputMode="numeric"
               />
-              <button style={styles.btn} onClick={onJoin} disabled={!room.connected}>
+              <button style={styles.btn} onClick={onJoinRoom} disabled={!room.connected}>
                 Join Room
               </button>
             </>
@@ -142,31 +166,26 @@ export default function GamePilot() {
               <button style={styles.btn} onClick={() => send({ type: "READY" })} disabled={!canReady}>
                 Ready
               </button>
-
-              <div style={styles.turnChip}>
-                {state?.phase === "lobby"
-                  ? "Lobby"
-                  : isMyTurn
-                  ? `Your turn • ${state?.turnStep || ""}`
-                  : "Waiting…"}
+              <div style={styles.roomHelp}>
+                Share code: <b>{room.roomId}</b>
               </div>
             </>
           )}
         </div>
 
-        {/* Activity Monitor */}
+        {/* Activity */}
         <ActivityMonitor events={room.activity || []} />
 
         {/* Table */}
         <div style={styles.table}>
-          {/* Opponents */}
           <div style={styles.opponents}>
-            {opponents.length ? opponents.map((p) => p.name).join(" • ") : "No opponents yet"}
+            {opponentNames || "Waiting for players…"}
           </div>
 
-          {/* Center */}
+          {/* Center piles */}
           <div style={styles.center}>
-            <div>
+            {/* Draw pile */}
+            <div style={styles.pileCol}>
               <div style={styles.label}>Draw ({deckCount})</div>
               <div
                 style={{
@@ -182,21 +201,25 @@ export default function GamePilot() {
                 <div style={{ ...styles.deckCard, transform: "translate(6px,-6px)" }} />
               </div>
               <div style={styles.miniHelp}>
-                {canDraw ? "Click to draw" : isMyTurn ? "Play step" : "—"}
+                {canDraw ? "Click to draw" : phase === "turn" ? "—" : "Not started"}
               </div>
             </div>
-            {state?.drawnCard && (
-            <div>
-              <div style={styles.label}>Drawn</div>
-              <Card
-                rank={state.drawnCard.rank}
-                suit={state.drawnCard.suit}
-                faceDown={false}
-              />
-            </div>
-          )}
 
-            <div>
+            {/* Drawn card (ALWAYS show slot) */}
+            <div style={styles.pileCol}>
+              <div style={styles.label}>Drawn</div>
+              {drawn ? (
+                <Card rank={drawn.rank} suit={drawn.suit} faceDown={false} />
+              ) : (
+                <div style={styles.emptyPile}>—</div>
+              )}
+              <div style={styles.miniHelp}>
+                {isMyTurn && turnStep === "play" ? "Swap or discard" : "—"}
+              </div>
+            </div>
+
+            {/* Discard pile */}
+            <div style={styles.pileCol}>
               <div style={styles.label}>Discard</div>
               {discardTop ? (
                 <Card rank={discardTop.rank} suit={discardTop.suit} faceDown={false} />
@@ -204,31 +227,26 @@ export default function GamePilot() {
                 <div style={styles.emptyPile}>Empty</div>
               )}
               <div style={styles.miniHelp}>
-                {isMyTurn && state?.turnStep === "draw" && discardTop
-                  ? "Swap w/ discard via button"
-                  : "—"}
+                {isMyTurn && turnStep === "draw" && discardTop ? "Swap before drawing" : "—"}
               </div>
             </div>
           </div>
 
-          {/* Your Hand */}
-          <div>
+          {/* Your hand */}
+          <div style={{ marginTop: 6 }}>
             <div style={styles.label}>
-              Your Hand{" "}
-              {me?.name ? <span style={{ opacity: 0.6 }}>• {me.name}</span> : null}
+              Your Hand {me?.name ? <span style={{ opacity: 0.6 }}>• {me.name}</span> : null}
             </div>
 
             <div style={styles.hand}>
               {myHand.map((c, i) => {
-                // MVP: "bottom two shown once" = indices 2 & 3
-                const showFace =
-                  initialReveal && (i === 2 || i === 3);
-
-                const isSelected = selectedCardId === c.id;
+                // 2x2 grid: bottom two are indices 2,3
+                const showFace = initialRevealActive && (i === 2 || i === 3);
+                const isSelected = selectedCardId === c?.id;
 
                 return (
                   <div
-                    key={c.id || i}
+                    key={c?.id || i}
                     style={{
                       borderRadius: 16,
                       outline: isSelected ? "2px solid rgba(255,255,255,.30)" : "2px solid transparent",
@@ -236,14 +254,10 @@ export default function GamePilot() {
                     }}
                   >
                     <Card
-                      rank={c.rank}
-                      suit={c.suit}
-                      faceDown={!showFace} // face up only during initial reveal
-                      onClick={() => {
-                        // Click = select + peek
-                        setSelectedCardId(c.id);
-                        revealCard(c);
-                      }}
+                      rank={c?.rank}
+                      suit={c?.suit}
+                      faceDown={!showFace}
+                      onClick={() => onCardClick(c)}
                     />
                   </div>
                 );
@@ -254,54 +268,49 @@ export default function GamePilot() {
             <div style={styles.actions}>
               <button
                 style={styles.btn}
-                disabled={!canPlay || !selectedCardId}
+                disabled={!canDiscardDrawn}
                 onClick={() => send({ type: "DISCARD_DRAWN" })}
-                title={!selectedCardId ? "Select a card first" : "Discard selected (and end turn)"}
+                title="Discard the drawn card (end turn)"
               >
-                Discard
+                Discard Drawn
               </button>
 
               <button
                 style={styles.btn}
-                disabled={!canPlay || !selectedCardId}
-                onClick={() => send({ type: "SWAP_DRAWN_WITH_HAND", targetCardId: selectedCardId })}})}
-                title={!selectedCardId ? "Select a card first" : "Swap drawn card with selected"}
+                disabled={!canSwapDrawn}
+                onClick={() => send({ type: "SWAP_DRAWN_WITH_HAND", targetCardId: selectedCardId })}
+                title="Swap drawn card with your selected hand card (end turn)"
               >
-                Swap (Hand)
+                Swap Drawn → Hand
               </button>
 
               <button
                 style={styles.btn}
-                disabled={!isMyTurn || state?.turnStep !== "draw" || !discardTop || !selectedCardId}
+                disabled={!canSwapDiscard}
                 onClick={() => send({ type: "SWAP_WITH_DISCARD", targetCardId: selectedCardId })}
-                title="Swap top discard with selected (instead of drawing)"
+                title="Swap top discard with your selected hand card (instead of drawing)"
               >
-                Swap (Discard)
+                Swap Discard → Hand
               </button>
 
-              {/* Keep your Kargo button for now (server logic later) */}
               <button
-                style={styles.btn}
-                onClick={() => alert("Kargo logic comes after the core loop is stable.")}
+                style={styles.btnGhost}
+                onClick={() => setSelectedCardId(null)}
+                title="Clear selection"
               >
-                Call Kargo
+                Clear
               </button>
             </div>
 
             <div style={styles.footerHelp}>
-              Tip: click a card to select it (outline) and open PeekModal.
+              Tip: click a card to select it (outline) and peek.
             </div>
           </div>
         </div>
       </div>
 
       {/* Peek Modal */}
-      <PeekModal
-        open={!!peek}
-        card={peek}
-        title="Peek"
-        onClose={() => setPeek(null)}
-      />
+      <PeekModal open={!!peekCard} card={peekCard} title="Peek" onClose={() => setPeekCard(null)} />
     </div>
   );
 }
@@ -318,25 +327,34 @@ const styles = {
     fontFamily:
       "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
   },
+
   wrap: { maxWidth: 980, margin: "0 auto", padding: 12 },
+
   header: {
     display: "flex",
     justifyContent: "space-between",
+    gap: 12,
     padding: "10px 12px",
     borderRadius: 18,
     background: "rgba(255,255,255,.07)",
     border: "1px solid rgba(255,255,255,.12)",
     marginBottom: 10,
+    alignItems: "center",
   },
-  title: { fontWeight: 900 },
-  chip: {
+  title: { fontWeight: 900, letterSpacing: 0.4 },
+  sub: { fontSize: 12, opacity: 0.7, marginTop: 2 },
+
+  pills: { display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" },
+  pill: {
     fontSize: 12,
     padding: "6px 10px",
     borderRadius: 999,
     background: "rgba(255,255,255,.08)",
+    border: "1px solid rgba(255,255,255,.12)",
+    opacity: 0.95,
   },
 
-  lobbyBar: {
+  lobby: {
     display: "flex",
     gap: 8,
     alignItems: "center",
@@ -347,6 +365,7 @@ const styles = {
     background: "rgba(255,255,255,.06)",
     border: "1px solid rgba(255,255,255,.10)",
   },
+
   input: {
     borderRadius: 14,
     padding: "10px 12px",
@@ -354,16 +373,17 @@ const styles = {
     border: "1px solid rgba(255,255,255,.14)",
     color: "rgba(255,255,255,.92)",
     outline: "none",
-    minWidth: 160,
+    minWidth: 170,
   },
-  turnChip: {
-    marginLeft: "auto",
+
+  roomHelp: {
     fontSize: 12,
-    padding: "8px 10px",
+    opacity: 0.8,
+    marginLeft: "auto",
+    padding: "6px 10px",
     borderRadius: 999,
     background: "rgba(255,255,255,.08)",
     border: "1px solid rgba(255,255,255,.12)",
-    opacity: 0.9,
   },
 
   table: {
@@ -372,14 +392,18 @@ const styles = {
     border: "1px solid rgba(255,255,255,.12)",
     padding: 12,
   },
+
   opponents: { fontSize: 13, opacity: 0.7, marginBottom: 6 },
 
   center: {
     display: "flex",
     justifyContent: "center",
-    gap: 30,
+    gap: 22,
     padding: "12px 0",
+    flexWrap: "wrap",
   },
+
+  pileCol: { display: "grid", justifyItems: "center", gap: 6, minWidth: 110 },
 
   deck: { width: 86, height: 118, position: "relative" },
   deckCard: {
@@ -389,6 +413,7 @@ const styles = {
     background:
       "linear-gradient(145deg, rgba(255,255,255,.12), rgba(255,255,255,.04))",
     border: "1px solid rgba(255,255,255,.16)",
+    boxShadow: "0 12px 28px rgba(0,0,0,.28)",
   },
 
   emptyPile: {
@@ -402,11 +427,11 @@ const styles = {
     opacity: 0.7,
   },
 
-  label: { fontSize: 12, opacity: 0.6, marginBottom: 6 },
+  label: { fontSize: 12, opacity: 0.6, marginBottom: 2 },
 
   hand: {
     display: "grid",
-    gridTemplateColumns: "repeat(2,1fr)",
+    gridTemplateColumns: "repeat(2, 1fr)",
     gap: 10,
     justifyItems: "center",
   },
@@ -419,12 +444,7 @@ const styles = {
     marginTop: 10,
   },
 
-  miniHelp: {
-    fontSize: 11,
-    opacity: 0.55,
-    marginTop: 6,
-    textAlign: "center",
-  },
+  miniHelp: { fontSize: 11, opacity: 0.55, textAlign: "center" },
 
   footerHelp: {
     fontSize: 11,
@@ -440,5 +460,15 @@ const styles = {
     border: "1px solid rgba(255,255,255,.16)",
     color: "rgba(255,255,255,.92)",
     cursor: "pointer",
+  },
+
+  btnGhost: {
+    borderRadius: 14,
+    padding: "10px 12px",
+    background: "transparent",
+    border: "1px solid rgba(255,255,255,.16)",
+    color: "rgba(255,255,255,.80)",
+    cursor: "pointer",
+    opacity: 0.9,
   },
 };
