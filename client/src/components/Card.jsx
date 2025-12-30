@@ -21,13 +21,6 @@ function isRedSuit(sym) {
   return sym === "♥" || sym === "♦";
 }
 
-/**
- * Visual-only Card component (no game logic).
- * Props:
- * - rank: "A","2"...,"10","J","Q","K" (or "?")
- * - suit: "spades"|"hearts"|"diamonds"|"clubs" OR "♠"|"♥"|"♦"|"♣"
- * - faceDown: true shows back
- */
 export default function Card({
   rank = "?",
   suit,
@@ -47,7 +40,6 @@ export default function Card({
     ...style,
   };
 
-  // Card back: darker gradient + subtle pattern
   if (faceDown) {
     return (
       <div
@@ -65,7 +57,6 @@ export default function Card({
           overflow: "hidden",
         }}
       >
-        {/* subtle pattern */}
         <div
           style={{
             position: "absolute",
@@ -76,7 +67,6 @@ export default function Card({
             mixBlendMode: "overlay",
           }}
         />
-        {/* inner border */}
         <div
           style={{
             position: "absolute",
@@ -89,7 +79,6 @@ export default function Card({
     );
   }
 
-  // Card face: slightly dark, premium gradient surface
   return (
     <div
       onClick={onClick}
@@ -110,7 +99,6 @@ export default function Card({
         overflow: "hidden",
       }}
     >
-      {/* corners */}
       <div
         style={{
           position: "absolute",
@@ -142,16 +130,7 @@ export default function Card({
         <div style={{ marginTop: 3 }}>{suitSym || ""}</div>
       </div>
 
-      {/* center pip */}
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          gap: 6,
-          transform: "translateY(1px)",
-        }}
-      >
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
         <div
           style={{
             fontSize: 34,
@@ -174,7 +153,6 @@ export default function Card({
         </div>
       </div>
 
-      {/* soft gloss */}
       <div
         style={{
           position: "absolute",
