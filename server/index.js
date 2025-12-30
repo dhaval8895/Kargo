@@ -127,9 +127,9 @@ function describeAction(action) {
   switch (action.type) {
     case "READY": return "is ready";
     case "DRAW": return "drew a card";
-    case "SWAP_WITH_DISCARD": return "swapped with discard";
-    case "SWAP_DRAWN_WITH_HAND": return "swapped drawn card with hand";
-    case "DISCARD_DRAWN": return "discarded the drawn card";
+    case "SWAP_DRAWN_WITH_HAND": return "swapped drawn card into hand";
+    case "THROW_PAIR": return "attempted to throw a pair";
+    case "END_TURN": return "ended their turn";
     default: return action.type;
   }
 }
