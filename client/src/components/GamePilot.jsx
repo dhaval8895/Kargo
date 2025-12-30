@@ -6,10 +6,10 @@ import { useRoom } from "../hooks/useRoom";
 
 export default function GamePilot() {
   const room = useRoom();
+  const state = room.state;
 
   const [name, setName] = useState("Player");
   const [roomCode, setRoomCode] = useState("");
-
   const [peekCard, setPeekCard] = useState(null);
 
   // Guess pair UI
@@ -17,16 +17,15 @@ export default function GamePilot() {
   const [pairSel, setPairSel] = useState([]);
   const [hint, setHint] = useState("");
 
-  // One click-per-draw gate on client (server is authoritative anyway)
-  const [clickedThisDraw, setClickedThisDraw] = useState(false);
-
-  const state = room.state;
-
-  const { me, myHand, opponents } = useMemo(() => {
-    if (!state || !room.playerId) return { me: null, myHand: [], opponents: [] };
+  const { me, myHand, opponents, playersById } = useMemo(() => {
+    if (!state || !room.playerId) {
+      return { me: null, myHand: [], opponents: [], playersById: {} };
+    }
+    const byId = {};
+    for (const p of state.players || []) byId[p.id] = p;
     const me = state.players?.find((p) => p.id === room.playerId) || null;
     const others = (state.players || []).filter((p) => p.id !== room.playerId);
-    return { me, myHand: me?.hand || [], opponents: others };
+    return { me, myHand: me?.hand || [], opponents: others, playersById: byId };
   }, [state, room.playerId]);
 
   const phase = state?.phase || "—";
@@ -44,16 +43,18 @@ export default function GamePilot() {
   const winnerName =
     winnerPlayerId && state?.players ? state.players.find((p) => p.id === winnerPlayerId)?.name : null;
 
+  const serverBuild = state?.serverBuild || "";
+
   useEffect(() => {
     setHint("");
     setPairMode(false);
     setPairSel([]);
   }, [state?.turnPlayerId, state?.phase]);
 
-  useEffect(() => {
-    // reset one-click-per-draw gate when you pick up a drawn card or new turn
-    setClickedThisDraw(false);
-  }, [drawn, state?.turnPlayerId]);
+  async function send(action) {
+    const res = await room.action(action);
+    if (!res?.ok) alert(res?.error || "Action failed");
+  }
 
   const canReady = phase === "lobby" && !!room.roomId;
   const canDraw = phase === "turn" && isMyTurn && turnStep === "draw";
@@ -63,26 +64,9 @@ export default function GamePilot() {
     if (winnerPlayerId) return "Game ended.";
     if (phase !== "turn") return "Not in turn phase.";
     if (!isMyTurn) return "Not your turn.";
-    if (holdingDrawn) return "Resolve drawn: either click a hand card (match or swap) or guess a pair.";
+    if (holdingDrawn) return "Resolve drawn: click a hand card (match/swap), discard drawn, or guess pair.";
     return "";
   }, [winnerPlayerId, phase, isMyTurn, holdingDrawn]);
-
-  async function onCreate() {
-    const res = await room.createRoom(name?.trim() || "Player");
-    if (!res?.ok) alert(res?.error || "Failed to create room");
-  }
-
-  async function onJoin() {
-    const code = (roomCode || "").trim();
-    if (!code) return alert("Enter room code");
-    const res = await room.joinRoom(code, name?.trim() || "Player");
-    if (!res?.ok) alert(res?.error || "Failed to join room");
-  }
-
-  async function send(action) {
-    const res = await room.action(action);
-    if (!res?.ok) alert(res?.error || "Action failed");
-  }
 
   function onHandCardClick(card) {
     if (!card?.id) return;
@@ -90,7 +74,6 @@ export default function GamePilot() {
 
     // Claim attempt (anyone) while claim is open
     if (claimOpen) {
-      // One attempt per window enforced server-side; client just sends.
       setHint("");
       send({ type: "CLAIM_DISCARD", cardId: card.id });
       return;
@@ -107,15 +90,9 @@ export default function GamePilot() {
       return;
     }
 
-    // Turn player holding drawn: one click-per-draw (unless they only want to guess pair first)
+    // Turn player holding drawn: clicking hand card triggers match-or-swap
     if (phase === "turn" && isMyTurn && holdingDrawn) {
-      if (clickedThisDraw) {
-        setHint("You already clicked once for this draw. Press End Turn when ready.");
-        return;
-      }
       setHint("");
-      setClickedThisDraw(true);
-      // Server will decide match vs swap behavior
       send({ type: "SWAP_DRAWN_WITH_HAND", targetCardId: card.id });
       return;
     }
@@ -160,7 +137,35 @@ export default function GamePilot() {
     setPairSel([]);
   }
 
-  const opponentNames = opponents.map((p) => p.name).filter(Boolean).join(" • ");
+  async function onCreate() {
+    const res = await room.createRoom(name?.trim() || "Player");
+    if (!res?.ok) alert(res?.error || "Failed to create room");
+  }
+
+  async function onJoin() {
+    const code = (roomCode || "").trim();
+    if (!code) return alert("Enter room code");
+    const res = await room.joinRoom(code, name?.trim() || "Player");
+    if (!res?.ok) alert(res?.error || "Failed to join room");
+  }
+
+  // Feed ActivityMonitor from server state log (so penalties show).
+  // If you already have room.activity, this will still prefer it.
+  const activityEvents = useMemo(() => {
+    const base = (room.activity && room.activity.length ? room.activity : state?.log || []).slice(-30);
+
+    // Normalize into ActivityMonitor-friendly objects
+    return base.map((e) => {
+      if (typeof e === "string") return e;
+      // our server log: {ts, playerId, type, text}
+      if (e && e.text) {
+        const playerName = e.playerId ? playersById[e.playerId]?.name || e.playerId : "System";
+        return { player: playerName, action: e.text };
+      }
+      // fallback
+      return e;
+    });
+  }, [room.activity, state?.log, playersById]);
 
   return (
     <div style={styles.bg}>
@@ -169,9 +174,12 @@ export default function GamePilot() {
           <div>
             <div style={styles.title}>KARGO — MVP</div>
             <div style={styles.sub}>
-              {room.connected ? "Connected" : "Kargo is offline"} {room.roomId ? `• Room: ${room.roomId}` : ""}
+              {room.connected ? "Connected" : "Kargo is offline"}
+              {room.roomId ? ` • Room: ${room.roomId}` : ""}
+              {serverBuild ? ` • Server: ${serverBuild}` : ""}
             </div>
           </div>
+
           <div style={styles.pills}>
             <span style={styles.pill}>Phase: {winnerPlayerId ? "GAME OVER" : phase}</span>
             <span style={styles.pill}>
@@ -188,12 +196,7 @@ export default function GamePilot() {
         </div>
 
         <div style={styles.lobby}>
-          <input
-            style={styles.input}
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Your name"
-          />
+          <input style={styles.input} value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" />
 
           {!room.roomId ? (
             <>
@@ -224,11 +227,9 @@ export default function GamePilot() {
           )}
         </div>
 
-        <ActivityMonitor events={room.activity || []} />
+        <ActivityMonitor events={activityEvents} />
 
         <div style={styles.table}>
-          <div style={styles.opponents}>{opponentNames || "Waiting for players…"}</div>
-
           <div style={styles.center}>
             {/* Draw */}
             <div style={styles.pileCol}>
@@ -249,15 +250,33 @@ export default function GamePilot() {
               <div style={styles.miniHelp}>{canDraw ? "Click to draw" : "—"}</div>
             </div>
 
-            {/* Drawn */}
+            {/* Drawn (CLICKABLE TO DISCARD) */}
             <div style={styles.pileCol}>
               <div style={styles.label}>Drawn</div>
-              {drawn ? <Card rank={drawn.rank} suit={drawn.suit} faceDown={false} /> : <div style={styles.emptyPile}>—</div>}
+
+              <div
+                style={{
+                  cursor: phase === "turn" && isMyTurn && drawn && !winnerPlayerId ? "pointer" : "default",
+                }}
+                onClick={() => {
+                  if (phase === "turn" && isMyTurn && drawn && !winnerPlayerId) {
+                    send({ type: "DISCARD_DRAWN" });
+                  }
+                }}
+                title={phase === "turn" && isMyTurn && drawn ? "Click to discard drawn card" : ""}
+              >
+                {drawn ? (
+                  <Card rank={drawn.rank} suit={drawn.suit} faceDown={false} />
+                ) : (
+                  <div style={styles.emptyPile}>—</div>
+                )}
+              </div>
+
               <div style={styles.miniHelp}>
                 {winnerPlayerId
                   ? "Game ended"
                   : isMyTurn && drawn
-                  ? "Click ONE hand card to match/swap OR Throw Pair (guess)"
+                  ? "Click drawn to discard • click ONE hand card to match/swap • or Throw Pair"
                   : "—"}
               </div>
             </div>
@@ -292,12 +311,7 @@ export default function GamePilot() {
                       padding: 2,
                     }}
                   >
-                    <Card
-                      rank={c?.rank}
-                      suit={c?.suit}
-                      faceDown={false}
-                      onClick={() => onHandCardClick(c)}
-                    />
+                    <Card rank={c?.rank} suit={c?.suit} faceDown={false} onClick={() => onHandCardClick(c)} />
                   </div>
                 );
               })}
@@ -347,7 +361,7 @@ export default function GamePilot() {
   );
 }
 
-// Styles unchanged (same as your baseline)
+// keep your existing styles (unchanged baseline)
 const styles = {
   bg: {
     minHeight: "100vh",
@@ -411,8 +425,12 @@ const styles = {
     background: "rgba(255,255,255,.08)",
     border: "1px solid rgba(255,255,255,.12)",
   },
-  table: { background: "rgba(255,255,255,.07)", borderRadius: 18, border: "1px solid rgba(255,255,255,.12)", padding: 12 },
-  opponents: { fontSize: 13, opacity: 0.7, marginBottom: 6 },
+  table: {
+    background: "rgba(255,255,255,.07)",
+    borderRadius: 18,
+    border: "1px solid rgba(255,255,255,.12)",
+    padding: 12,
+  },
   center: { display: "flex", justifyContent: "center", gap: 22, padding: "12px 0", flexWrap: "wrap" },
   pileCol: { display: "grid", justifyItems: "center", gap: 6, minWidth: 110 },
   deck: { width: 86, height: 118, position: "relative" },
