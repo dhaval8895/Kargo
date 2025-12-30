@@ -185,6 +185,16 @@ export default function GamePilot() {
                 {canDraw ? "Click to draw" : isMyTurn ? "Play step" : "—"}
               </div>
             </div>
+            {state?.drawnCard && (
+            <div>
+              <div style={styles.label}>Drawn</div>
+              <Card
+                rank={state.drawnCard.rank}
+                suit={state.drawnCard.suit}
+                faceDown={false}
+              />
+            </div>
+          )}
 
             <div>
               <div style={styles.label}>Discard</div>
@@ -245,7 +255,7 @@ export default function GamePilot() {
               <button
                 style={styles.btn}
                 disabled={!canPlay || !selectedCardId}
-                onClick={() => send({ type: "DISCARD", cardId: selectedCardId })}
+                onClick={() => send({ type: "DISCARD_DRAWN" })}
                 title={!selectedCardId ? "Select a card first" : "Discard selected (and end turn)"}
               >
                 Discard
@@ -254,7 +264,7 @@ export default function GamePilot() {
               <button
                 style={styles.btn}
                 disabled={!canPlay || !selectedCardId}
-                onClick={() => send({ type: "SWAP_WITH_HAND", targetCardId: selectedCardId })}
+                onClick={() => send({ type: "SWAP_DRAWN_WITH_HAND", targetCardId: selectedCardId })}})}
                 title={!selectedCardId ? "Select a card first" : "Swap drawn card with selected"}
               >
                 Swap (Hand)
