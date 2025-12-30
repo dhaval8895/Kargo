@@ -1,9 +1,6 @@
 // server/engine/validate.js
 import { PHASES } from "./types.js";
 
-/**
- * Primary validator (named export).
- */
 export function validate(state, playerId, action) {
   if (!action || !action.type) return { ok: false, error: "Bad action" };
   if (state.winnerPlayerId) return { ok: false, error: "Game over" };
@@ -16,16 +13,14 @@ export function validate(state, playerId, action) {
     return { ok: true };
   }
 
-  // Claim window: ANY player may attempt while open (including turn player)
+  // Claim window: any player may attempt while open
   if (action.type === "CLAIM_DISCARD") {
     if (!state.claim || !state.claim.open) return { ok: false, error: "No claim window" };
+    if (!action.cardId) return { ok: false, error: "Missing cardId" };
 
-    // one attempt per player per window (server authoritative)
     if (state.claim.attemptedBy && state.claim.attemptedBy[playerId]) {
       return { ok: false, error: "Already attempted claim" };
     }
-
-    if (!action.cardId) return { ok: false, error: "Missing cardId" };
     return { ok: true };
   }
 
@@ -33,19 +28,23 @@ export function validate(state, playerId, action) {
   if (state.phase !== PHASES.TURN) return { ok: false, error: "Not in turn phase" };
   if (!isTurnPlayer) return { ok: false, error: "Not your turn" };
 
-  // Draw
   if (action.type === "DRAW") {
     if (state.turnStep !== "draw") return { ok: false, error: "You must resolve first" };
     if (state.drawnCard) return { ok: false, error: "Already holding drawn card" };
     return { ok: true };
   }
 
-  // Resolve actions (after draw)
-  // Model: draw -> resolve (swap/match OR guess pair) -> end
+  // After draw: resolve actions
   if (action.type === "SWAP_DRAWN_WITH_HAND") {
     if (state.turnStep !== "resolve") return { ok: false, error: "You must draw first" };
     if (!state.drawnCard) return { ok: false, error: "You must draw first" };
     if (!action.targetCardId) return { ok: false, error: "Missing targetCardId" };
+    return { ok: true };
+  }
+
+  if (action.type === "DISCARD_DRAWN") {
+    if (state.turnStep !== "resolve") return { ok: false, error: "You must draw first" };
+    if (!state.drawnCard) return { ok: false, error: "You must draw first" };
     return { ok: true };
   }
 
@@ -54,25 +53,19 @@ export function validate(state, playerId, action) {
     if (!state.drawnCard) return { ok: false, error: "You must draw first" };
     if (!action.a || !action.b) return { ok: false, error: "Missing pair selection" };
 
-    // no retry per draw (server authoritative)
     if (state.resolve?.guessAttempted) {
       return { ok: false, error: "No retry" };
     }
     return { ok: true };
   }
 
-  // End turn
   if (action.type === "END_TURN") {
     if (state.drawnCard) return { ok: false, error: "Resolve your drawn card first" };
     return { ok: true };
   }
 
-  // Unknown action
   return { ok: false, error: `Unknown action: ${action.type}` };
 }
 
-/**
- * ✅ CRITICAL: alias export to match server/index.js import:
- *   import { validateAction } from "./engine/validate.js";
- */
+// ✅ must exist for Render (server/index.js imports validateAction)
 export const validateAction = validate;
