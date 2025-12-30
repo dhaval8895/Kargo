@@ -1,57 +1,68 @@
-export function validateAction(state, playerId, action) {
-  if (!action?.type) return { ok: false, error: "Invalid action" };
+// server/validate.js
+import { PHASES } from "./types.js";
 
-  const me = (state.players || []).find((p) => p.id === playerId);
-  if (!me) return { ok: false, error: "Player not found" };
+export function validate(state, playerId, action) {
+  if (!action || !action.type) return { ok: false, error: "Bad action" };
+  if (state.winnerPlayerId) return { ok: false, error: "Game over" };
+
+  const isTurnPlayer = state.phase === PHASES.TURN && state.turnPlayerId === playerId;
 
   // Lobby
   if (action.type === "READY") {
-    if (state.phase !== "lobby") return { ok: false, error: "Not in lobby" };
+    if (state.phase !== PHASES.LOBBY) return { ok: false, error: "Not in lobby" };
     return { ok: true };
   }
 
-  // Turn gate
-  if (state.phase !== "turn") return { ok: false, error: "Game not started" };
-  if (state.turnPlayerId !== playerId) return { ok: false, error: "Not your turn" };
+  // Claim window: any player may attempt while open
+  if (action.type === "CLAIM_DISCARD") {
+    if (!state.claim || !state.claim.open) return { ok: false, error: "No claim window" };
 
-  switch (action.type) {
-    case "DRAW": {
-      if (state.turnStep !== "draw") return { ok: false, error: "You already drew" };
-      if (!Array.isArray(state.deck) || state.deck.length === 0) return { ok: false, error: "Deck empty" };
-      return { ok: true };
+    // one attempt per player per window (server authoritative)
+    if (state.claim.attemptedBy && state.claim.attemptedBy[playerId]) {
+      return { ok: false, error: "Already attempted claim" };
     }
 
-    case "SWAP_DRAWN_WITH_HAND": {
-      if (state.turnStep !== "swap") return { ok: false, error: "You must draw first" };
-      if (!state.drawnCard) return { ok: false, error: "No drawn card" };
-      if (!action.targetCardId) return { ok: false, error: "Missing targetCardId" };
-      if (!me.hand.some((c) => c.id === action.targetCardId)) return { ok: false, error: "You don't have that card" };
-      return { ok: true };
-    }
-
-    case "END_TURN": {
-      if (state.turnStep !== "pair") return { ok: false, error: "You must swap before ending turn" };
-      return { ok: true };
-    }
-
-    case "THROW_PAIR": {
-      if (state.turnStep !== "pair") return { ok: false, error: "Throw pair is only after swap" };
-      const a = action.a;
-      const b = action.b;
-      if (!a || !b) return { ok: false, error: "Select two cards" };
-      if (a === b) return { ok: false, error: "Pick two different cards" };
-
-      const ids = new Set(me.hand.map((c) => c.id));
-      if (!ids.has(a) || !ids.has(b)) return { ok: false, error: "Selected cards must be in your hand" };
-
-      // Must have at least 1 card in deck to resolve success/fail outcomes
-      if (!Array.isArray(state.deck) || state.deck.length === 0) {
-        return { ok: false, error: "Deck empty" };
-      }
-      return { ok: true };
-    }
-
-    default:
-      return { ok: false, error: `Unknown action: ${action.type}` };
+    return { ok: true };
   }
+
+  // Everything below requires turn phase + turn player
+  if (state.phase !== PHASES.TURN) return { ok: false, error: "Not in turn phase" };
+  if (!isTurnPlayer) return { ok: false, error: "Not your turn" };
+
+  // Draw
+  if (action.type === "DRAW") {
+    if (state.turnStep !== "draw") return { ok: false, error: "You must resolve first" };
+    if (state.drawnCard) return { ok: false, error: "Already holding drawn card" };
+    return { ok: true };
+  }
+
+  // Resolve actions (after draw)
+  // NOTE: Your new model is: draw -> resolve (swap/match OR guess) -> end
+  if (action.type === "SWAP_DRAWN_WITH_HAND") {
+    if (state.turnStep !== "resolve") return { ok: false, error: "You must draw first" };
+    if (!state.drawnCard) return { ok: false, error: "You must draw first" };
+    if (!action.targetCardId) return { ok: false, error: "Missing targetCardId" };
+    return { ok: true };
+  }
+
+  if (action.type === "GUESS_PAIR") {
+    if (state.turnStep !== "resolve") return { ok: false, error: "You must draw first" };
+    if (!state.drawnCard) return { ok: false, error: "You must draw first" };
+    if (!action.a || !action.b) return { ok: false, error: "Missing pair selection" };
+
+    // no retry per draw (server authoritative)
+    if (state.resolve?.guessAttempted) {
+      return { ok: false, error: "No retry" };
+    }
+    return { ok: true };
+  }
+
+  // End turn
+  if (action.type === "END_TURN") {
+    if (state.drawnCard) return { ok: false, error: "Resolve your drawn card first" };
+    return { ok: true };
+  }
+
+  // Unknown action
+  return { ok: false, error: `Unknown action: ${action.type}` };
 }
