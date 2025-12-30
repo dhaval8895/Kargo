@@ -3,10 +3,16 @@ import { useMemo, useState } from "react";
 export default function ActivityMonitor({ events = [] }) {
   const [open, setOpen] = useState(false);
 
-  const latest = useMemo(() => {
-    if (!events.length) return { player: "", action: "Waiting for first move…" };
-    return events[0];
+  // newest-first list, limited to last 12
+  const latestFirst = useMemo(() => {
+    if (!events?.length) return [];
+    return [...events].slice(-12).reverse();
   }, [events]);
+
+  const latest = useMemo(() => {
+    if (!latestFirst.length) return { player: "", action: "Waiting for first move…" };
+    return latestFirst[0];
+  }, [latestFirst]);
 
   return (
     <div style={styles.wrap}>
@@ -15,15 +21,15 @@ export default function ActivityMonitor({ events = [] }) {
           <strong>{latest.player}</strong>{" "}
           <span>{latest.action}</span>
         </div>
-        <button style={styles.btn} onClick={() => setOpen(v => !v)}>
+        <button style={styles.btn} onClick={() => setOpen((v) => !v)}>
           {open ? "Close" : "Log"}
         </button>
       </div>
 
       {open && (
         <div style={styles.panel}>
-          {events.slice(0, 12).map((e, i) => (
-            <div key={i} style={styles.line}>
+          {latestFirst.map((e) => (
+            <div key={e.id || `${e.player}-${e.ts}-${e.action}`} style={styles.line}>
               <strong>{e.player}</strong>{" "}
               <span>{e.action}</span>
             </div>
