@@ -1,278 +1,128 @@
-import React, { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { getPairOptions } from "./useTurnResolution";
 
-/**
- * MVP TURN LOOP (UPDATED TO YOUR RULE)
- * Draw -> Optional Throw Pair (ONLY while holding drawn card) -> Else Swap -> End Turn
- *
- * IMPORTANT:
- * - Pair throw is ONLY allowed while you are holding a drawn card (before swap).
- * - After swap, pair throw is NOT allowed.
- * - End Turn is always clickable; if blocked, it shows why.
- */
-
-const sameRank = (a, b) => a && b && a.rank === b.rank;
-
-function cardLabel(c) {
-  if (!c) return "";
-  return `${c.rank}${c.suit || ""}`;
-}
-
-export default function GamePilot({ me, gameState, actions }) {
-  const isMyTurn = gameState?.currentTurnPlayerId === me?.id;
+export default function GamePilot({
+  me,
+  gameState,
+  actions,
+  Lobby,          // ← your existing lobby component
+  Table,          // ← your existing table/cards component
+}) {
+  const isMyTurn = gameState.currentTurnPlayerId === me.id;
+  const myHand = gameState.handsByPlayerId[me.id] || [];
 
   const [drawnCard, setDrawnCard] = useState(null);
-  const [uiHint, setUiHint] = useState("");
+  const [hasSwapped, setHasSwapped] = useState(false);
+  const [hint, setHint] = useState("");
 
-  const myHand = useMemo(() => {
-    return (gameState?.handsByPlayerId?.[me?.id] || []).slice();
-  }, [gameState, me?.id]);
+  /** RESET PER TURN */
+  useEffect(() => {
+    setDrawnCard(null);
+    setHasSwapped(false);
+    setHint("");
+  }, [gameState.currentTurnPlayerId]);
+
+  /** PAIR OPTIONS (authoritative) */
+  const pairOptions = useMemo(
+    () =>
+      getPairOptions({
+        hand: myHand,
+        drawnCard,
+        hasSwapped,
+      }),
+    [myHand, drawnCard, hasSwapped]
+  );
 
   const holdingDrawn = !!drawnCard;
 
-  // Pair options exist ONLY while holding a drawn card (before swap)
-  const pairOptions = useMemo(() => {
-    if (!isMyTurn || !holdingDrawn) return [];
+  /** DRAW */
+  async function onDrawDeck() {
+    if (!isMyTurn || holdingDrawn) return;
+    const c = await actions.drawFromDeck();
+    setDrawnCard(c);
+  }
 
-    const opts = [];
+  async function onDrawDiscard() {
+    if (!isMyTurn || holdingDrawn) return;
+    const c = await actions.drawFromDiscard();
+    setDrawnCard(c);
+  }
 
-    // A) Drawn match (drawn + one matching hand card)
-    myHand.forEach((c, idx) => {
-      if (sameRank(c, drawnCard)) {
-        opts.push({
-          id: `DRAWN_MATCH_${idx}`,
-          kind: "DRAWN_MATCH",
-          handIndices: [idx],
-          label: `Throw: ${cardLabel(drawnCard)} + ${cardLabel(c)}`,
-        });
-      }
-    });
+  /** THROW PAIR (BEFORE SWAP ONLY) */
+  async function onThrowPair(option) {
+    if (!holdingDrawn || hasSwapped) return;
 
-    // B) Hand pair (two same-rank in hand) — keep drawn card
-    for (let i = 0; i < myHand.length; i++) {
-      for (let j = i + 1; j < myHand.length; j++) {
-        if (sameRank(myHand[i], myHand[j])) {
-          opts.push({
-            id: `HAND_PAIR_${i}_${j}`,
-            kind: "HAND_PAIR",
-            handIndices: [i, j],
-            label: `Throw: ${cardLabel(myHand[i])} + ${cardLabel(myHand[j])} (keep drawn)`,
-          });
-        }
-      }
-    }
-
-    return opts;
-  }, [isMyTurn, holdingDrawn, myHand, drawnCard]);
-
-  // Swap is ONLY while holding drawn (and only if you didn't throw pair)
-  const canSwap = isMyTurn && holdingDrawn;
-
-  const endTurnBlockedReason = useMemo(() => {
-    if (!isMyTurn) return "Not your turn.";
-    if (holdingDrawn) return "Resolve your drawn card: throw a pair (if available) or swap it into your hand.";
-    return "";
-  }, [isMyTurn, holdingDrawn]);
-
-  const clearHintSoon = () => {
-    window.clearTimeout(clearHintSoon._t);
-    clearHintSoon._t = window.setTimeout(() => setUiHint(""), 1800);
-  };
-
-  const onDrawDeck = async () => {
-    setUiHint("");
-    if (!isMyTurn) return bounceHint("Not your turn.");
-    if (holdingDrawn) return bounceHint("You already drew — resolve it first.");
-
-    const c = await actions.drawFromDeck?.();
-    if (c) {
-      setDrawnCard(c);
-      actions.log?.({ player: me?.name, action: `drew deck (${cardLabel(c)})` });
-    }
-  };
-
-  const onDrawDiscard = async () => {
-    setUiHint("");
-    if (!isMyTurn) return bounceHint("Not your turn.");
-    if (holdingDrawn) return bounceHint("You already drew — resolve it first.");
-    if (!gameState?.discardTop) return bounceHint("Discard is empty.");
-
-    const c = await actions.drawFromDiscard?.();
-    if (c) {
-      setDrawnCard(c);
-      actions.log?.({ player: me?.name, action: `drew discard (${cardLabel(c)})` });
-    }
-  };
-
-  const onThrowPair = async (opt) => {
-    setUiHint("");
-    if (!isMyTurn || !holdingDrawn) return;
-
-    const ok = await actions.throwPair?.({
-      kind: opt.kind,
+    await actions.throwPair({
+      type: option.type,
       drawnCard,
-      handIndices: opt.handIndices,
+      indices: option.indices,
     });
 
-    if (ok) {
-      actions.log?.({ player: me?.name, action: `threw pair (${opt.label})` });
-      setDrawnCard(null);
-      setUiHint("Pair thrown. Click End Turn.");
-      return clearHintSoon();
+    setDrawnCard(null);
+    setHint("Pair thrown. End your turn.");
+  }
+
+  /** SWAP (ONLY IF NO PAIR USED) */
+  async function onSwap(handIndex) {
+    if (!holdingDrawn || hasSwapped) return;
+
+    await actions.swapWithHandIndex({
+      drawnCard,
+      handIndex,
+    });
+
+    setDrawnCard(null);
+    setHasSwapped(true);
+    setHint("Swapped. End your turn.");
+  }
+
+  /** END TURN (FRIENDLY UX) */
+  async function onEndTurn() {
+    if (holdingDrawn) {
+      setHint("Finish your draw: throw a pair or swap.");
+      return;
     }
-
-    bounceHint("Pair throw failed (server rejected).");
-  };
-
-  const onClickHandCard = async (handIndex) => {
-    setUiHint("");
-    if (!isMyTurn) return bounceHint("Not your turn.");
-
-    // While holding drawn card, clicking a hand card performs swap (NO peek here)
-    if (canSwap) {
-      const ok = await actions.swapWithHandIndex?.({ drawnCard, handIndex });
-      if (ok) {
-        actions.log?.({
-          player: me?.name,
-          action: `swapped drawn (${cardLabel(drawnCard)}) with hand[${handIndex}]`,
-        });
-        setDrawnCard(null);
-        setUiHint("Swapped. Click End Turn.");
-        return clearHintSoon();
-      }
-      return bounceHint("Swap failed (server rejected).");
-    }
-
-    // Not holding drawn: this build doesn’t swap; (peek can be elsewhere)
-    return bounceHint("Draw a card first.");
-  };
-
-  const onEndTurn = async () => {
-    setUiHint("");
-    if (endTurnBlockedReason) return bounceHint(endTurnBlockedReason);
-
-    const ok = await actions.endTurn?.();
-    if (ok) {
-      actions.log?.({ player: me?.name, action: "ended turn" });
-      setDrawnCard(null);
-      setUiHint("");
-    } else {
-      bounceHint("End turn failed (server rejected).");
-    }
-  };
-
-  function bounceHint(msg) {
-    setUiHint(msg);
-    clearHintSoon();
+    await actions.endTurn();
   }
 
   return (
-    <div style={{ padding: 16, color: "white" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-        <div style={{ fontSize: 14, opacity: 0.9 }}>
-          Turn: <b>{isMyTurn ? "You" : "Opponent"}</b>
-        </div>
+    <>
+      {/* ✅ LOBBY / READY / GAME HEADER */}
+      <Lobby gameState={gameState} />
 
-        {/* End Turn is ALWAYS clickable + informative */}
-        <button
-          onClick={onEndTurn}
-          title={endTurnBlockedReason || "End your turn"}
-          style={{
-            padding: "10px 14px",
-            borderRadius: 12,
-            border: "1px solid rgba(255,255,255,0.18)",
-            background: endTurnBlockedReason ? "rgba(255,255,255,0.10)" : "rgba(255,255,255,0.18)",
-            color: "white",
-            cursor: "pointer",
-            fontWeight: 800,
-            letterSpacing: 0.3,
-            boxShadow: "0 10px 24px rgba(0,0,0,0.25)",
-          }}
-        >
-          End Turn
-          {endTurnBlockedReason ? (
-            <span style={{ marginLeft: 10, fontWeight: 600, opacity: 0.75, fontSize: 12 }}>
-              (finish draw)
-            </span>
-          ) : null}
-        </button>
-      </div>
+      {/* ✅ MAIN TABLE / CARDS */}
+      <Table
+        gameState={gameState}
+        drawnCard={drawnCard}
+        onHandCardClick={onSwap}
+      />
 
-      <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
-        <button onClick={onDrawDeck} style={btnStyle(isMyTurn && !holdingDrawn)}>
+      {/* ✅ TURN CONTROLS */}
+      <div className="turn-controls">
+        <button onClick={onDrawDeck} disabled={!isMyTurn || holdingDrawn}>
           Draw (Deck)
         </button>
 
-        <button onClick={onDrawDiscard} style={btnStyle(isMyTurn && !holdingDrawn && !!gameState?.discardTop)}>
+        <button onClick={onDrawDiscard} disabled={!isMyTurn || holdingDrawn}>
           Draw (Discard)
         </button>
 
-        {holdingDrawn ? (
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-            <div style={{ opacity: 0.9, fontSize: 13 }}>
-              Drawn: <b>{cardLabel(drawnCard)}</b>
-            </div>
-
-            {pairOptions.length ? (
-              pairOptions.map((opt) => (
-                <button key={opt.id} onClick={() => onThrowPair(opt)} style={btnStyle(true)}>
-                  {opt.label}
-                </button>
-              ))
-            ) : (
-              <div style={{ opacity: 0.75, fontSize: 13 }}>
-                No pair available — click a hand card to swap.
-              </div>
-            )}
+        {pairOptions.length > 0 && (
+          <div className="pair-options">
+            {pairOptions.map((opt, i) => (
+              <button key={i} onClick={() => onThrowPair(opt)}>
+                Throw Pair
+              </button>
+            ))}
           </div>
-        ) : null}
-      </div>
+        )}
 
-      {uiHint ? (
-        <div style={{ marginTop: 10, padding: "10px 12px", borderRadius: 12, background: "rgba(0,0,0,0.25)" }}>
-          <span style={{ opacity: 0.95, fontSize: 13 }}>{uiHint}</span>
-        </div>
-      ) : null}
+        <button onClick={onEndTurn} className="end-turn">
+          End Turn
+        </button>
 
-      <div style={{ marginTop: 18 }}>
-        <div style={{ opacity: 0.85, fontSize: 13, marginBottom: 8 }}>Your hand</div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 150px)", gap: 12 }}>
-          {myHand.map((c, idx) => (
-            <button
-              key={idx}
-              onClick={() => onClickHandCard(idx)}
-              style={{
-                width: 150,
-                height: 210,
-                borderRadius: 18,
-                border: "1px solid rgba(255,255,255,0.14)",
-                background: "rgba(255,255,255,0.06)",
-                color: "white",
-                cursor: isMyTurn ? "pointer" : "not-allowed",
-                opacity: isMyTurn ? 1 : 0.6,
-              }}
-              title={!isMyTurn ? "Not your turn" : holdingDrawn ? "Click to swap" : "Draw first"}
-            >
-              <div style={{ fontSize: 20, fontWeight: 800 }}>{cardLabel(c)}</div>
-              <div style={{ marginTop: 8, opacity: 0.7, fontSize: 12 }}>
-                {holdingDrawn ? "Click to swap" : "Draw to act"}
-              </div>
-            </button>
-          ))}
-        </div>
+        {hint && <div className="turn-hint">{hint}</div>}
       </div>
-    </div>
+    </>
   );
-}
-
-function btnStyle(enabled) {
-  return {
-    padding: "10px 12px",
-    borderRadius: 12,
-    border: "1px solid rgba(255,255,255,0.16)",
-    background: enabled ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.06)",
-    color: "white",
-    cursor: enabled ? "pointer" : "not-allowed",
-    opacity: enabled ? 1 : 0.55,
-    fontWeight: 700,
-  };
 }
