@@ -1,7 +1,7 @@
 import { PHASES } from "./types.js";
 import { buildDeck, shuffle } from "./deck.js";
 
-// Works on Node 18+. If you still need fallback, tell me and I'll swap to JSON clone.
+// Node 18+ on Render
 const clone = (obj) => structuredClone(obj);
 
 export function createInitialState() {
@@ -11,9 +11,10 @@ export function createInitialState() {
     deck: [],
     discard: [],
     drawnCard: null,
+
     turnPlayerId: null,
     turnIndex: 0,
-    turnStep: "draw", // "draw" -> ("play" if you drew) -> next turn
+    turnStep: "draw", // draw -> swap -> pair
   };
 }
 
@@ -33,11 +34,14 @@ function startTurns(s) {
 }
 
 function nextTurn(s) {
-  const alive = s.players;
-  s.turnIndex = (s.turnIndex + 1) % alive.length;
-  s.turnPlayerId = alive[s.turnIndex].id;
+  s.turnIndex = (s.turnIndex + 1) % s.players.length;
+  s.turnPlayerId = s.players[s.turnIndex].id;
   s.turnStep = "draw";
   s.drawnCard = null;
+}
+
+function removeCardsByIds(hand, idA, idB) {
+  return hand.filter((c) => c.id !== idA && c.id !== idB);
 }
 
 export function applyAction(state, playerId, action) {
@@ -48,60 +52,68 @@ export function applyAction(state, playerId, action) {
     case "READY": {
       me.ready = true;
 
-      // Auto-start when 2+ players and all ready
       if (s.players.length >= 2 && s.players.every((p) => p.ready)) {
-        s.phase = PHASES.DEALT;
-
         s.deck = shuffle(buildDeck());
         s.discard = [];
         s.drawnCard = null;
 
         deal4(s);
-        startTurns(s);
 
         s.phase = PHASES.TURN;
+        startTurns(s);
       }
       return s;
     }
 
-    // ---- Step: draw ----
     case "DRAW": {
       s.drawnCard = s.deck.pop();
-      s.turnStep = "play";
+      s.turnStep = "swap";
       return s;
     }
 
-    case "SWAP_WITH_DISCARD": {
-      // Instead of drawing, you take top discard into your hand slot
-      const top = s.discard.pop(); // top discard card
-
-      const idx = me.hand.findIndex((c) => c.id === action.targetCardId);
-      const replaced = me.hand[idx];
-
-      me.hand[idx] = top;
-      s.discard.push(replaced);
-
-      // Since you didn't draw, your turn ends immediately
-      nextTurn(s);
-      return s;
-    }
-
-    // ---- Step: play (only after DRAW) ----
     case "SWAP_DRAWN_WITH_HAND": {
       const idx = me.hand.findIndex((c) => c.id === action.targetCardId);
       const replaced = me.hand[idx];
 
+      // swap in drawn card; replaced goes to discard
       me.hand[idx] = s.drawnCard;
       s.discard.push(replaced);
 
       s.drawnCard = null;
+      s.turnStep = "pair";
+      return s;
+    }
+
+    case "END_TURN": {
       nextTurn(s);
       return s;
     }
 
-    case "DISCARD_DRAWN": {
-      s.discard.push(s.drawnCard);
-      s.drawnCard = null;
+    case "THROW_PAIR": {
+      const aId = action.a;
+      const bId = action.b;
+
+      const a = me.hand.find((c) => c.id === aId);
+      const b = me.hand.find((c) => c.id === bId);
+
+      const isPair = a && b && a.rank === b.rank;
+
+      if (isPair) {
+        // Discard the pair
+        s.discard.push(a, b);
+        me.hand = removeCardsByIds(me.hand, aId, bId);
+
+        // Keep game moving: draw 1 replacement
+        if (s.deck.length > 0) {
+          me.hand.push(s.deck.pop());
+        }
+      } else {
+        // Failed attempt: keep both + penalty card (draw 1)
+        if (s.deck.length > 0) {
+          me.hand.push(s.deck.pop());
+        }
+      }
+
       nextTurn(s);
       return s;
     }
