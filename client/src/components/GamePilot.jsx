@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import Card from "./Card";
 import ActivityMonitor from "./ActivityMonitor";
 import PeekModal from "./PeekModal";
-import { useRoom } from "./hooks/useRoom";
+import { useRoom } from "../hooks/useRoom";
 
 /**
  * GamePilot (Real MVP Hookup)
