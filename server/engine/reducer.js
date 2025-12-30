@@ -1,3 +1,4 @@
+// server/reducer.js
 import { PHASES } from "./types.js";
 import { buildDeck, shuffle } from "./deck.js";
 
@@ -5,6 +6,8 @@ const clone = (obj) => structuredClone(obj);
 
 export function createInitialState() {
   return {
+    serverBuild: "kargo-server-2025-12-30-v2",
+
     phase: PHASES.LOBBY,
     players: [],
     deck: [],
@@ -20,8 +23,24 @@ export function createInitialState() {
 
     // claim window persists until NEXT DRAW
     claim: null, // { open, rank, winnerPlayerId, attemptedBy:{} }
-    winnerPlayerId: null, // instant win if any hand hits 0
+
+    // game over
+    winnerPlayerId: null,
+
+    // simple state-backed log (UI can show this)
+    log: [], // [{ ts, playerId, type, text }]
   };
+}
+
+function logEvent(s, playerId, type, text) {
+  s.log.push({
+    ts: Date.now(),
+    playerId,
+    type, // e.g. "INFO" | "PENALTY" | "ACTION"
+    text,
+  });
+  // optional cap to avoid unbounded growth
+  if (s.log.length > 200) s.log = s.log.slice(s.log.length - 200);
 }
 
 function deal4(s) {
@@ -52,8 +71,13 @@ function isPlayersTurn(s, playerId) {
   return s.phase === PHASES.TURN && s.turnPlayerId === playerId;
 }
 
-function drawPenaltyCard(s, player) {
-  if (s.deck.length > 0) player.hand.push(s.deck.pop());
+function drawPenaltyCard(s, player, playerId, reason) {
+  if (s.deck.length > 0) {
+    player.hand.push(s.deck.pop());
+    logEvent(s, playerId, "PENALTY", `Penalty card added (${reason})`);
+  } else {
+    logEvent(s, playerId, "PENALTY", `Penalty attempted but deck empty (${reason})`);
+  }
 }
 
 function openClaimWindow(s, rank) {
@@ -63,6 +87,7 @@ function openClaimWindow(s, rank) {
     winnerPlayerId: null,
     attemptedBy: {},
   };
+  logEvent(s, null, "INFO", `Claim window opened for rank ${rank}`);
 }
 
 function removeCardById(hand, id) {
@@ -76,7 +101,10 @@ function removeCardById(hand, id) {
 
 function endGameIfEmptyHand(s, pid) {
   const p = s.players.find((x) => x.id === pid);
-  if (p && p.hand.length === 0) s.winnerPlayerId = pid;
+  if (p && p.hand.length === 0) {
+    s.winnerPlayerId = pid;
+    logEvent(s, pid, "INFO", "Instant win: player reached 0 cards");
+  }
 }
 
 export function applyAction(state, playerId, action) {
@@ -90,7 +118,9 @@ export function applyAction(state, playerId, action) {
   switch (action.type) {
     case "READY": {
       if (s.phase !== PHASES.LOBBY) return s;
+
       me.ready = true;
+      logEvent(s, playerId, "ACTION", "READY");
 
       if (s.players.length >= 2 && s.players.every((p) => p.ready)) {
         s.deck = shuffle(buildDeck());
@@ -98,12 +128,14 @@ export function applyAction(state, playerId, action) {
         s.drawnCard = null;
         s.claim = null;
         s.winnerPlayerId = null;
+        s.log = [];
 
         for (const p of s.players) p.hand = p.hand || [];
         deal4(s);
 
         s.phase = PHASES.TURN;
         startTurns(s);
+        logEvent(s, null, "INFO", "Game started");
       }
       return s;
     }
@@ -115,18 +147,45 @@ export function applyAction(state, playerId, action) {
       if (s.deck.length === 0) return s;
 
       // close claim when next player draws (your rule)
-      if (s.claim?.open) s.claim.open = false;
+      if (s.claim?.open) {
+        s.claim.open = false;
+        logEvent(s, null, "INFO", "Claim window closed (next player drew)");
+      }
 
       s.drawnCard = s.deck.pop();
       s.turnStep = "resolve";
       s.resolve = { guessAttempted: false };
+
+      logEvent(s, playerId, "ACTION", `DRAW ${s.drawnCard.rank}`);
+      return s;
+    }
+
+    /**
+     * NEW: discard drawn card (if you don't want to swap)
+     * - puts drawn on discard
+     * - opens claim window for that rank
+     * - clears drawn
+     * - player presses END_TURN after
+     */
+    case "DISCARD_DRAWN": {
+      if (!isPlayersTurn(s, playerId)) return s;
+      if (s.turnStep !== "resolve") return s;
+      if (!s.drawnCard) return s;
+
+      const discarded = s.drawnCard;
+      s.discard.push(discarded);
+      s.drawnCard = null;
+
+      logEvent(s, playerId, "ACTION", `DISCARD_DRAWN ${discarded.rank}`);
+
+      openClaimWindow(s, discarded.rank);
       return s;
     }
 
     /**
      * Turn player clicks a hand card while holding drawn:
-     * - If ranks match: discard drawn + clicked, hand becomes N-1
-     * - If ranks don't match: swap; clicked goes to discard; open claim window
+     * - If ranks match: discard drawn + clicked => N-1
+     * - If ranks don't match: swap; clicked -> discard; open claim window
      * - No penalty for turn player
      * - Drawn always clears
      */
@@ -143,15 +202,18 @@ export function applyAction(state, playerId, action) {
       if (clicked.rank === s.drawnCard.rank) {
         s.discard.push(s.drawnCard, clicked);
         me.hand.splice(idx, 1);
-        s.drawnCard = null;
+        logEvent(s, playerId, "ACTION", `MATCH_THROW ${clicked.rank} (drawn+hand)`);
 
+        s.drawnCard = null;
         endGameIfEmptyHand(s, playerId);
         return s;
       }
 
-      // not match => swap
+      // not match => swap (discard clicked)
       me.hand[idx] = s.drawnCard;
       s.discard.push(clicked);
+      logEvent(s, playerId, "ACTION", `SWAP (discard ${clicked.rank})`);
+
       s.drawnCard = null;
 
       openClaimWindow(s, clicked.rank);
@@ -192,14 +254,17 @@ export function applyAction(state, playerId, action) {
         me.hand = me.hand.filter((c) => c.id !== aId && c.id !== bId);
 
         me.hand.push(s.drawnCard);
-        s.drawnCard = null;
+        logEvent(s, playerId, "ACTION", `GUESS_PAIR_SUCCESS ${a.rank} (kept drawn)`);
 
+        s.drawnCard = null;
         endGameIfEmptyHand(s, playerId);
         return s;
       }
 
       // fail => penalty, drawn remains, no retry
-      drawPenaltyCard(s, me);
+      logEvent(s, playerId, "ACTION", "GUESS_PAIR_FAIL");
+      drawPenaltyCard(s, me, playerId, "Failed guess pair");
+
       return s;
     }
 
@@ -208,7 +273,7 @@ export function applyAction(state, playerId, action) {
      * payload: { type:"CLAIM_DISCARD", cardId }
      *
      * - each player can attempt ONCE per claim window
-     * - first matching claim wins: discard 1 card (same rank)
+     * - first matching claim wins: discard 1 matching card
      * - late or wrong claims: penalty draw 1; clicked card stays
      * - claim stays open until next DRAW, but winner is locked
      */
@@ -230,13 +295,15 @@ export function applyAction(state, playerId, action) {
 
       // winner already exists => late attempt => penalty
       if (s.claim.winnerPlayerId) {
-        drawPenaltyCard(s, claimant);
+        logEvent(s, playerId, "ACTION", `CLAIM_LATE_ATTEMPT ${card.rank}`);
+        drawPenaltyCard(s, claimant, playerId, "Late claim attempt");
         return s;
       }
 
       // wrong rank => penalty
       if (card.rank !== s.claim.rank) {
-        drawPenaltyCard(s, claimant);
+        logEvent(s, playerId, "ACTION", `CLAIM_WRONG_RANK clicked ${card.rank}, need ${s.claim.rank}`);
+        drawPenaltyCard(s, claimant, playerId, "Wrong-rank claim");
         return s;
       }
 
@@ -248,6 +315,8 @@ export function applyAction(state, playerId, action) {
       s.discard.push(removed); // claimed card becomes top discard
       s.claim.winnerPlayerId = playerId;
 
+      logEvent(s, playerId, "ACTION", `CLAIM_SUCCESS ${removed.rank} (card discarded)`);
+
       endGameIfEmptyHand(s, playerId);
       return s;
     }
@@ -255,6 +324,8 @@ export function applyAction(state, playerId, action) {
     case "END_TURN": {
       if (!isPlayersTurn(s, playerId)) return s;
       if (s.drawnCard) return s; // must resolve drawn first
+
+      logEvent(s, playerId, "ACTION", "END_TURN");
       nextTurn(s);
       return s;
     }
