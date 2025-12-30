@@ -1,5 +1,5 @@
 // server/engine/validate.js
-import { PHASES } from "../types.js";
+import { PHASES } from "./types.js";
 
 /**
  * Primary validator (named export).
