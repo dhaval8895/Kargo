@@ -4,14 +4,17 @@ export default function ActivityMonitor({ events = [] }) {
   const [open, setOpen] = useState(false);
 
   const latest = useMemo(() => {
-    if (!events.length) return "Waiting for first move…";
+    if (!events.length) return { player: "", action: "Waiting for first move…" };
     return events[0];
   }, [events]);
 
   return (
     <div style={styles.wrap}>
       <div style={styles.row}>
-        <div style={styles.latest} title={latest}>{latest}</div>
+        <div style={styles.latest}>
+          <strong>{latest.player}</strong>{" "}
+          <span>{latest.action}</span>
+        </div>
         <button style={styles.btn} onClick={() => setOpen(v => !v)}>
           {open ? "Close" : "Log"}
         </button>
@@ -20,7 +23,10 @@ export default function ActivityMonitor({ events = [] }) {
       {open && (
         <div style={styles.panel}>
           {events.slice(0, 12).map((e, i) => (
-            <div key={i} style={styles.line}>{e}</div>
+            <div key={i} style={styles.line}>
+              <strong>{e.player}</strong>{" "}
+              <span>{e.action}</span>
+            </div>
           ))}
         </div>
       )}
@@ -47,7 +53,7 @@ const styles = {
   },
   latest: {
     fontSize: 13,
-    color: "rgba(255,255,255,0.70)",
+    color: "rgba(255,255,255,0.75)",
     whiteSpace: "nowrap",
     overflow: "hidden",
     textOverflow: "ellipsis",
