@@ -9,23 +9,69 @@ export default function ActivityMonitor({ events = [] }) {
   }, [events]);
 
   return (
-    <div className="kg-panel kg-activity">
-      <div className="kg-activity-collapsed">
-        <div className="kg-muted" style={{ fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-          {latest}
-        </div>
-        <button className="kg-btn" onClick={() => setOpen(v => !v)}>
+    <div style={styles.wrap}>
+      <div style={styles.row}>
+        <div style={styles.latest} title={latest}>{latest}</div>
+        <button style={styles.btn} onClick={() => setOpen(v => !v)}>
           {open ? "Close" : "Log"}
         </button>
       </div>
 
       {open && (
-        <div className="kg-activity-expanded">
+        <div style={styles.panel}>
           {events.slice(0, 12).map((e, i) => (
-            <div key={i} className="kg-logline">{e}</div>
+            <div key={i} style={styles.line}>{e}</div>
           ))}
         </div>
       )}
     </div>
   );
 }
+
+const styles = {
+  wrap: {
+    position: "sticky",
+    top: 0,
+    zIndex: 10,
+    borderRadius: 16,
+    overflow: "hidden",
+    background: "rgba(255,255,255,0.07)",
+    border: "1px solid rgba(255,255,255,0.12)",
+    backdropFilter: "blur(10px)",
+  },
+  row: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: "10px 12px",
+  },
+  latest: {
+    fontSize: 13,
+    color: "rgba(255,255,255,0.70)",
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    paddingRight: 10,
+    flex: 1,
+  },
+  btn: {
+    borderRadius: 14,
+    padding: "8px 10px",
+    border: "1px solid rgba(255,255,255,0.16)",
+    background: "rgba(255,255,255,0.10)",
+    color: "rgba(255,255,255,0.92)",
+    cursor: "pointer",
+  },
+  panel: {
+    maxHeight: "34vh",
+    overflow: "auto",
+    padding: "10px 12px",
+    borderTop: "1px solid rgba(255,255,255,0.10)",
+  },
+  line: {
+    fontSize: 13,
+    color: "rgba(255,255,255,0.65)",
+    padding: "6px 0",
+    borderBottom: "1px solid rgba(255,255,255,0.06)",
+  },
+};
