@@ -1,7 +1,6 @@
 import { PHASES } from "./types.js";
 import { buildDeck, shuffle } from "./deck.js";
 
-// Node 18+ on Render
 const clone = (obj) => structuredClone(obj);
 
 export function createInitialState() {
@@ -14,14 +13,14 @@ export function createInitialState() {
 
     turnPlayerId: null,
     turnIndex: 0,
-    turnStep: "draw", // draw -> resolve (swap or guess/match) -> end
+    turnStep: "draw", // "draw" | "resolve"
 
     // per-draw lock for guessing pair
     resolve: { guessAttempted: false },
 
-    // claim window stays open until next DRAW
-    claim: null, // { open:boolean, rank:string, winnerPlayerId:null|string, attemptedBy:{[pid]:true}, openedOnTurnPlayerId }
-    winnerPlayerId: null, // game ends when set
+    // claim window persists until NEXT DRAW
+    claim: null, // { open, rank, winnerPlayerId, attemptedBy:{} }
+    winnerPlayerId: null, // instant win if any hand hits 0
   };
 }
 
@@ -46,7 +45,7 @@ function nextTurn(s) {
   s.turnStep = "draw";
   s.drawnCard = null;
   s.resolve = { guessAttempted: false };
-  // claim persists until next DRAW (per your rule)
+  // claim stays open until next DRAW (your rule)
 }
 
 function isPlayersTurn(s, playerId) {
@@ -62,17 +61,8 @@ function openClaimWindow(s, rank) {
     open: true,
     rank,
     winnerPlayerId: null,
-    attemptedBy: {}, // pid -> true
-    openedOnTurnPlayerId: s.turnPlayerId,
+    attemptedBy: {},
   };
-}
-
-function endGameIfEmptyHand(s, playerId) {
-  const p = s.players.find((x) => x.id === playerId);
-  if (!p) return;
-  if (p.hand.length === 0) {
-    s.winnerPlayerId = playerId;
-  }
 }
 
 function removeCardById(hand, id) {
@@ -84,18 +74,22 @@ function removeCardById(hand, id) {
   return { hand: next, removed };
 }
 
+function endGameIfEmptyHand(s, pid) {
+  const p = s.players.find((x) => x.id === pid);
+  if (p && p.hand.length === 0) s.winnerPlayerId = pid;
+}
+
 export function applyAction(state, playerId, action) {
   const s = clone(state);
   const me = s.players.find((p) => p.id === playerId);
   if (!me) return s;
 
-  // Game over guard
+  // hard stop on game end
   if (s.winnerPlayerId) return s;
 
   switch (action.type) {
     case "READY": {
       if (s.phase !== PHASES.LOBBY) return s;
-
       me.ready = true;
 
       if (s.players.length >= 2 && s.players.every((p) => p.ready)) {
@@ -120,8 +114,7 @@ export function applyAction(state, playerId, action) {
       if (s.drawnCard) return s;
       if (s.deck.length === 0) return s;
 
-      // Per your rule: claim window remains open until next player draws.
-      // So on any DRAW, we close it.
+      // close claim when next player draws (your rule)
       if (s.claim?.open) s.claim.open = false;
 
       s.drawnCard = s.deck.pop();
@@ -131,12 +124,11 @@ export function applyAction(state, playerId, action) {
     }
 
     /**
-     * Click a hand card while holding drawn (TURN PLAYER ONLY):
-     * - If ranks match: discard drawn + clicked => N-1
-     * - If ranks don't match: perform swap (discard clicked, drawn becomes hand card)
+     * Turn player clicks a hand card while holding drawn:
+     * - If ranks match: discard drawn + clicked, hand becomes N-1
+     * - If ranks don't match: swap; clicked goes to discard; open claim window
      * - No penalty for turn player
-     * - After either, drawn clears, player must press End Turn
-     * - Swap path opens claim window for discarded clicked card rank
+     * - Drawn always clears
      */
     case "SWAP_DRAWN_WITH_HAND": {
       if (!isPlayersTurn(s, playerId)) return s;
@@ -148,11 +140,8 @@ export function applyAction(state, playerId, action) {
 
       const clicked = me.hand[idx];
 
-      // MATCH path
       if (clicked.rank === s.drawnCard.rank) {
-        // discard drawn + clicked
         s.discard.push(s.drawnCard, clicked);
-        // remove clicked, drawn resolved
         me.hand.splice(idx, 1);
         s.drawnCard = null;
 
@@ -160,31 +149,27 @@ export function applyAction(state, playerId, action) {
         return s;
       }
 
-      // NOT MATCH path => swap (discard clicked)
+      // not match => swap
       me.hand[idx] = s.drawnCard;
       s.discard.push(clicked);
       s.drawnCard = null;
 
-      // open claim on clicked rank
       openClaimWindow(s, clicked.rank);
-
       return s;
     }
 
     /**
-     * Throw Pair (Guess) — ONLY turn player, ONLY once per draw:
-     * payload: { type: "GUESS_PAIR", a, b }
+     * Guess pair (Throw Pair button) — ONLY turn player, ONLY once per draw
+     * payload: { type:"GUESS_PAIR", a, b }
      *
-     * If same rank:
-     * - discard a & b
-     * - keep drawn (drawn joins hand)
-     * - net N-1
-     * If not same rank:
-     * - selected cards stay
-     * - penalty draw 1
-     * - no retry (guessAttempted locks)
-     * In both cases: drawn remains if fail; drawn clears if success (because it joins hand)
-     * Player continues and must resolve drawn (swap) if still holding it, then press End.
+     * success:
+     *  - discard a,b
+     *  - drawn joins hand
+     *  - net N-1
+     * fail:
+     *  - keep a,b
+     *  - penalty draw 1
+     *  - drawn stays (player can swap after)
      */
     case "GUESS_PAIR": {
       if (!isPlayersTurn(s, playerId)) return s;
@@ -203,7 +188,6 @@ export function applyAction(state, playerId, action) {
       if (!a || !b) return s;
 
       if (a.rank === b.rank) {
-        // success: discard two, keep drawn by putting into hand
         s.discard.push(a, b);
         me.hand = me.hand.filter((c) => c.id !== aId && c.id !== bId);
 
@@ -214,62 +198,55 @@ export function applyAction(state, playerId, action) {
         return s;
       }
 
-      // fail: cards stay, penalty + no retry
+      // fail => penalty, drawn remains, no retry
       drawPenaltyCard(s, me);
       return s;
     }
 
     /**
-     * Claim discard — any player while claim window is open.
-     * payload: { type: "CLAIM_DISCARD", cardId }
+     * Claim discard — any player while claim is open
+     * payload: { type:"CLAIM_DISCARD", cardId }
      *
-     * Rules:
-     * - Any player (including turn player) can attempt.
-     * - Only one attempt per player per claim window.
-     * - If claim already has a winner, any further attempts:
-     *    - matching or not -> clicked card stays + penalty draw 1
-     * - If no winner yet:
-     *    - if card rank matches claim rank -> winner discards 1 card (hand -1), becomes winner
-     *    - else -> penalty draw 1, card stays
+     * - each player can attempt ONCE per claim window
+     * - first matching claim wins: discard 1 card (same rank)
+     * - late or wrong claims: penalty draw 1; clicked card stays
+     * - claim stays open until next DRAW, but winner is locked
      */
     case "CLAIM_DISCARD": {
       if (!s.claim || !s.claim.open) return s;
 
-      const cardId = action.cardId;
-      if (!cardId) return s;
-
       const claimant = s.players.find((p) => p.id === playerId);
       if (!claimant) return s;
 
-      // Only one attempt per player per claim window
+      const cardId = action.cardId;
+      if (!cardId) return s;
+
+      // one attempt per window
       if (s.claim.attemptedBy[playerId]) return s;
       s.claim.attemptedBy[playerId] = true;
 
       const card = claimant.hand.find((c) => c.id === cardId);
       if (!card) return s;
 
-      // If already claimed (winner exists), everyone else gets penalty + card back
+      // winner already exists => late attempt => penalty
       if (s.claim.winnerPlayerId) {
         drawPenaltyCard(s, claimant);
         return s;
       }
 
-      // No winner yet: check match rank
+      // wrong rank => penalty
       if (card.rank !== s.claim.rank) {
-        // Wrong rank (not their turn) => penalty + keep card
         drawPenaltyCard(s, claimant);
         return s;
       }
 
-      // Match => winner
+      // match => winner
       const { hand: nextHand, removed } = removeCardById(claimant.hand, cardId);
       if (!removed) return s;
 
       claimant.hand = nextHand;
-      s.discard.push(removed);
-
+      s.discard.push(removed); // claimed card becomes top discard
       s.claim.winnerPlayerId = playerId;
-      // claim window stays open until next DRAW, but winner is now locked
 
       endGameIfEmptyHand(s, playerId);
       return s;
@@ -277,10 +254,7 @@ export function applyAction(state, playerId, action) {
 
     case "END_TURN": {
       if (!isPlayersTurn(s, playerId)) return s;
-
-      // cannot end while holding drawn
-      if (s.drawnCard) return s;
-
+      if (s.drawnCard) return s; // must resolve drawn first
       nextTurn(s);
       return s;
     }
