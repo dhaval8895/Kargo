@@ -7,20 +7,18 @@ import { useRoom } from "../hooks/useRoom";
 export default function GamePilot() {
   const room = useRoom();
 
-  // Lobby
   const [name, setName] = useState("Player");
   const [roomCode, setRoomCode] = useState("");
 
-  // Peek
   const [peekCard, setPeekCard] = useState(null);
 
-  // Throw-pair UI
+  // Guess pair UI
   const [pairMode, setPairMode] = useState(false);
-  const [pairSel, setPairSel] = useState([]); // [idA, idB]
-
-  // ✅ NEW: UX hint + local swap gate
+  const [pairSel, setPairSel] = useState([]);
   const [hint, setHint] = useState("");
-  const [swappedThisDraw, setSwappedThisDraw] = useState(false);
+
+  // One click-per-draw gate on client (server is authoritative anyway)
+  const [clickedThisDraw, setClickedThisDraw] = useState(false);
 
   const state = room.state;
 
@@ -34,54 +32,40 @@ export default function GamePilot() {
   const phase = state?.phase || "—";
   const isMyTurn = state?.turnPlayerId === room.playerId;
   const turnStep = state?.turnStep || "—";
-
-  const deckCount = state?.deck?.count ?? 0;
-  const discardTop = state?.discard?.[0] || null;
   const drawn = state?.drawnCard || null;
+  const deckCount = state?.deck?.count ?? state?.deck?.length ?? 0;
+  const discardTop = state?.discard?.[state?.discard?.length - 1] || null;
 
-  // Reset local gates whenever drawn changes or turn changes
+  const claim = state?.claim || null;
+  const claimOpen = !!claim?.open;
+  const claimRank = claim?.rank || null;
+
+  const winnerPlayerId = state?.winnerPlayerId || null;
+  const winnerName =
+    winnerPlayerId && state?.players ? state.players.find((p) => p.id === winnerPlayerId)?.name : null;
+
   useEffect(() => {
     setHint("");
     setPairMode(false);
     setPairSel([]);
-    // If there is no drawn card, you are not in a "post-draw" state
-    if (!drawn) setSwappedThisDraw(false);
+  }, [state?.turnPlayerId, state?.phase]);
+
+  useEffect(() => {
+    // reset one-click-per-draw gate when you pick up a drawn card or new turn
+    setClickedThisDraw(false);
   }, [drawn, state?.turnPlayerId]);
 
   const canReady = phase === "lobby" && !!room.roomId;
-
-  // Draw is only allowed by your server step gate (leave as-is)
   const canDraw = phase === "turn" && isMyTurn && turnStep === "draw";
+  const holdingDrawn = !!drawn;
 
-  // Swap-by-click is allowed whenever you have a drawn card on your turn
-  // ✅ plus local gate: after you swap once, drawn becomes null anyway, but keep the flag for clarity
-  const canSwapByClick = phase === "turn" && isMyTurn && !!drawn;
-
-  /**
-   * ✅ NEW RULE:
-   * Throw Pair is ONLY allowed immediately after draw, BEFORE swap.
-   * That means:
-   *  - must be your turn
-   *  - must be holding drawn
-   *  - must NOT have swapped since drawing
-   *
-   * We do NOT rely on server turnStep === "pair" anymore because that was the old rule.
-   */
-  const canThrowPair = phase === "turn" && isMyTurn && !!drawn && !swappedThisDraw;
-
-  /**
-   * ✅ End Turn UX:
-   * Button is always clickable.
-   * But "allowed" only when:
-   *  - not your turn => blocked
-   *  - OR you are holding drawn => blocked (must throw pair or swap)
-   */
   const endTurnBlockedReason = useMemo(() => {
+    if (winnerPlayerId) return "Game ended.";
     if (phase !== "turn") return "Not in turn phase.";
     if (!isMyTurn) return "Not your turn.";
-    if (drawn) return "Resolve your drawn card: throw a pair (if possible) or swap it.";
+    if (holdingDrawn) return "Resolve drawn: either click a hand card (match or swap) or guess a pair.";
     return "";
-  }, [phase, isMyTurn, drawn]);
+  }, [winnerPlayerId, phase, isMyTurn, holdingDrawn]);
 
   async function onCreate() {
     const res = await room.createRoom(name?.trim() || "Player");
@@ -102,33 +86,48 @@ export default function GamePilot() {
 
   function onHandCardClick(card) {
     if (!card?.id) return;
+    if (winnerPlayerId) return;
 
-    // Pair selection mode (hand-hand pair)
+    // Claim attempt (anyone) while claim is open
+    if (claimOpen) {
+      // One attempt per window enforced server-side; client just sends.
+      setHint("");
+      send({ type: "CLAIM_DISCARD", cardId: card.id });
+      return;
+    }
+
+    // Guess pair selection
     if (pairMode) {
       setPairSel((prev) => {
         const has = prev.includes(card.id);
         if (has) return prev.filter((x) => x !== card.id);
-        if (prev.length >= 2) return prev; // max 2
+        if (prev.length >= 2) return prev;
         return [...prev, card.id];
       });
       return;
     }
 
-    // ✅ Swap-by-click wins over peek
-    if (canSwapByClick) {
+    // Turn player holding drawn: one click-per-draw (unless they only want to guess pair first)
+    if (phase === "turn" && isMyTurn && holdingDrawn) {
+      if (clickedThisDraw) {
+        setHint("You already clicked once for this draw. Press End Turn when ready.");
+        return;
+      }
       setHint("");
-      setSwappedThisDraw(true);
+      setClickedThisDraw(true);
+      // Server will decide match vs swap behavior
       send({ type: "SWAP_DRAWN_WITH_HAND", targetCardId: card.id });
       return;
     }
 
-    // Otherwise: peek
+    // Otherwise peek
     setPeekCard(card);
   }
 
   function togglePairMode() {
-    if (!canThrowPair) {
-      setHint(drawn ? "You must throw pair BEFORE swap." : "Draw a card first.");
+    if (winnerPlayerId) return;
+    if (!(phase === "turn" && isMyTurn && holdingDrawn)) {
+      setHint("You can only Throw Pair on your turn after drawing.");
       return;
     }
     setHint("");
@@ -136,40 +135,21 @@ export default function GamePilot() {
     setPairSel([]);
   }
 
-  // ✅ NEW: one-click option when drawn matches a hand card
-  const drawnMatchTargets = useMemo(() => {
-    if (!canThrowPair || !drawn) return [];
-    const matches = myHand.filter((c) => c?.rank === drawn.rank);
-    return matches;
-  }, [canThrowPair, drawn, myHand]);
-
-  async function throwPairWithDrawn(targetHandCardId) {
-    if (!canThrowPair || !drawn) return;
-    setHint("");
-    // NEW action type (server must support)
-    await send({ type: "THROW_PAIR_WITH_DRAWN", targetCardId: targetHandCardId });
-    setPairMode(false);
-    setPairSel([]);
-  }
-
-  async function confirmPair() {
-    if (!canThrowPair) {
-      setHint(drawn ? "You must throw pair BEFORE swap." : "Draw a card first.");
+  async function confirmGuessPair() {
+    if (winnerPlayerId) return;
+    if (!(phase === "turn" && isMyTurn && holdingDrawn)) {
+      setHint("You can only Throw Pair on your turn after drawing.");
       return;
     }
     if (pairSel.length !== 2) return alert("Select exactly two cards");
-
     setHint("");
-
-    // NEW action type: two hand cards, keep drawn (server must support)
-    await send({ type: "THROW_PAIR_FROM_HAND_KEEP_DRAWN", a: pairSel[0], b: pairSel[1] });
-
+    await send({ type: "GUESS_PAIR", a: pairSel[0], b: pairSel[1] });
     setPairMode(false);
     setPairSel([]);
   }
 
   async function endTurn() {
-    // Always clickable; if blocked, show hint
+    if (winnerPlayerId) return;
     if (endTurnBlockedReason) {
       setHint(endTurnBlockedReason);
       return;
@@ -189,19 +169,21 @@ export default function GamePilot() {
           <div>
             <div style={styles.title}>KARGO — MVP</div>
             <div style={styles.sub}>
-              {room.connected ? "Connected" : "Kargo is offline"}{" "}
-              {room.roomId ? `• Room: ${room.roomId}` : ""}
+              {room.connected ? "Connected" : "Kargo is offline"} {room.roomId ? `• Room: ${room.roomId}` : ""}
             </div>
           </div>
           <div style={styles.pills}>
-            <span style={styles.pill}>Phase: {phase}</span>
+            <span style={styles.pill}>Phase: {winnerPlayerId ? "GAME OVER" : phase}</span>
             <span style={styles.pill}>
-              {phase === "turn"
+              {winnerPlayerId
+                ? `Winner: ${winnerName || winnerPlayerId}`
+                : phase === "turn"
                 ? isMyTurn
                   ? `Your turn • ${turnStep}`
                   : `Waiting • ${turnStep}`
                 : "—"}
             </span>
+            {claimOpen ? <span style={styles.pill}>Claim: {claimRank}</span> : null}
           </div>
         </div>
 
@@ -254,10 +236,10 @@ export default function GamePilot() {
               <div
                 style={{
                   ...styles.deck,
-                  opacity: canDraw ? 1 : 0.6,
-                  cursor: canDraw ? "pointer" : "default",
+                  opacity: canDraw && !winnerPlayerId ? 1 : 0.6,
+                  cursor: canDraw && !winnerPlayerId ? "pointer" : "default",
                 }}
-                onClick={() => canDraw && send({ type: "DRAW" })}
+                onClick={() => canDraw && !winnerPlayerId && send({ type: "DRAW" })}
                 title={canDraw ? "Click to draw" : "Not available"}
               >
                 <div style={styles.deckCard} />
@@ -270,13 +252,13 @@ export default function GamePilot() {
             {/* Drawn */}
             <div style={styles.pileCol}>
               <div style={styles.label}>Drawn</div>
-              {drawn ? (
-                <Card rank={drawn.rank} suit={drawn.suit} faceDown={false} />
-              ) : (
-                <div style={styles.emptyPile}>—</div>
-              )}
+              {drawn ? <Card rank={drawn.rank} suit={drawn.suit} faceDown={false} /> : <div style={styles.emptyPile}>—</div>}
               <div style={styles.miniHelp}>
-                {isMyTurn && drawn ? (canThrowPair ? "Throw pair OR click a hand card to swap" : "Click a hand card to swap") : "—"}
+                {winnerPlayerId
+                  ? "Game ended"
+                  : isMyTurn && drawn
+                  ? "Click ONE hand card to match/swap OR Throw Pair (guess)"
+                  : "—"}
               </div>
             </div>
 
@@ -288,7 +270,7 @@ export default function GamePilot() {
               ) : (
                 <div style={styles.emptyPile}>Empty</div>
               )}
-              <div style={styles.miniHelp}>—</div>
+              <div style={styles.miniHelp}>{claimOpen ? "Claim window open" : "—"}</div>
             </div>
           </div>
 
@@ -322,59 +304,38 @@ export default function GamePilot() {
             </div>
 
             <div style={styles.actions}>
-              {/* ✅ New: quick “drawn match” button(s) */}
-              {canThrowPair && drawnMatchTargets.length > 0 ? (
-                drawnMatchTargets.map((c) => (
-                  <button
-                    key={c.id}
-                    style={styles.btn}
-                    onClick={() => throwPairWithDrawn(c.id)}
-                    title="Throw pair using drawn + this matching card"
-                  >
-                    Throw {drawn.rank} Pair
-                  </button>
-                ))
-              ) : null}
-
               <button
                 style={styles.btn}
-                disabled={!canThrowPair}
+                disabled={!(phase === "turn" && isMyTurn && holdingDrawn) || winnerPlayerId}
                 onClick={togglePairMode}
-                title="Throw a hand pair (keep drawn) — only before swap"
+                title="Guess pair (select 2 cards) — only on your turn after drawing"
               >
                 {pairMode ? "Cancel Pair" : "Throw Pair"}
               </button>
 
               <button
                 style={styles.btn}
-                disabled={!pairMode || pairSel.length !== 2 || !canThrowPair}
-                onClick={confirmPair}
-                title="Confirm selected hand pair"
+                disabled={!pairMode || pairSel.length !== 2 || winnerPlayerId}
+                onClick={confirmGuessPair}
+                title="Confirm selected guess pair"
               >
                 Confirm
               </button>
 
-              {/* ✅ End Turn: always clickable */}
-              <button
-                style={{
-                  ...styles.btnGhost,
-                  opacity: endTurnBlockedReason ? 1 : styles.btnGhost.opacity,
-                }}
-                onClick={endTurn}
-                title={endTurnBlockedReason || "End turn"}
-              >
+              <button style={styles.btnGhost} onClick={endTurn} title={endTurnBlockedReason || "End turn"}>
                 End Turn{endTurnBlockedReason ? " (finish draw)" : ""}
               </button>
             </div>
 
-            {/* ✅ New hint area */}
             {hint ? (
-              <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75, textAlign: "right" }}>
-                {hint}
-              </div>
+              <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75, textAlign: "right" }}>{hint}</div>
             ) : (
               <div style={styles.footerHelp}>
-                {isMyTurn && drawn ? "Resolve drawn: throw pair (if possible) or swap by clicking a hand card." : ""}
+                {winnerPlayerId
+                  ? `Winner: ${winnerName || winnerPlayerId}`
+                  : claimOpen
+                  ? `Claim open for rank ${claimRank} (any player can try once)`
+                  : ""}
               </div>
             )}
           </div>
@@ -386,7 +347,7 @@ export default function GamePilot() {
   );
 }
 
-// styles unchanged (copied verbatim from your file)
+// Styles unchanged (same as your baseline)
 const styles = {
   bg: {
     minHeight: "100vh",
@@ -396,8 +357,7 @@ const styles = {
       "radial-gradient(900px 700px at 55% 95%, rgba(120,255,200,.08), transparent 55%)," +
       "#0b0f14",
     color: "rgba(255,255,255,.92)",
-    fontFamily:
-      "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
+    fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
   },
   wrap: { maxWidth: 980, margin: "0 auto", padding: 12 },
   header: {
@@ -451,28 +411,16 @@ const styles = {
     background: "rgba(255,255,255,.08)",
     border: "1px solid rgba(255,255,255,.12)",
   },
-  table: {
-    background: "rgba(255,255,255,.07)",
-    borderRadius: 18,
-    border: "1px solid rgba(255,255,255,.12)",
-    padding: 12,
-  },
+  table: { background: "rgba(255,255,255,.07)", borderRadius: 18, border: "1px solid rgba(255,255,255,.12)", padding: 12 },
   opponents: { fontSize: 13, opacity: 0.7, marginBottom: 6 },
-  center: {
-    display: "flex",
-    justifyContent: "center",
-    gap: 22,
-    padding: "12px 0",
-    flexWrap: "wrap",
-  },
+  center: { display: "flex", justifyContent: "center", gap: 22, padding: "12px 0", flexWrap: "wrap" },
   pileCol: { display: "grid", justifyItems: "center", gap: 6, minWidth: 110 },
   deck: { width: 86, height: 118, position: "relative" },
   deckCard: {
     position: "absolute",
     inset: 0,
     borderRadius: 14,
-    background:
-      "linear-gradient(145deg, rgba(255,255,255,.12), rgba(255,255,255,.04))",
+    background: "linear-gradient(145deg, rgba(255,255,255,.12), rgba(255,255,255,.04))",
     border: "1px solid rgba(255,255,255,.16)",
     boxShadow: "0 12px 28px rgba(0,0,0,.28)",
   },
@@ -487,19 +435,8 @@ const styles = {
     opacity: 0.7,
   },
   label: { fontSize: 12, opacity: 0.6, marginBottom: 2 },
-  hand: {
-    display: "grid",
-    gridTemplateColumns: "repeat(2, 1fr)",
-    gap: 10,
-    justifyItems: "center",
-  },
-  actions: {
-    display: "flex",
-    justifyContent: "flex-end",
-    flexWrap: "wrap",
-    gap: 8,
-    marginTop: 10,
-  },
+  hand: { display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10, justifyItems: "center" },
+  actions: { display: "flex", justifyContent: "flex-end", flexWrap: "wrap", gap: 8, marginTop: 10 },
   miniHelp: { fontSize: 11, opacity: 0.55, textAlign: "center" },
   footerHelp: { fontSize: 11, opacity: 0.55, marginTop: 8, textAlign: "right" },
   btn: {
