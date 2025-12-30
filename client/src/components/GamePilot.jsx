@@ -7,12 +7,14 @@ import { useRoom } from "../hooks/useRoom";
 export default function GamePilot() {
   const room = useRoom();
 
+  // Lobby
   const [name, setName] = useState("Player");
   const [roomCode, setRoomCode] = useState("");
 
+  // Peek
   const [peekCard, setPeekCard] = useState(null);
 
-  // Throw pair UI
+  // Throw-pair UI
   const [pairMode, setPairMode] = useState(false);
   const [pairSel, setPairSel] = useState([]); // [idA, idB]
 
@@ -35,7 +37,9 @@ export default function GamePilot() {
 
   const canReady = phase === "lobby" && !!room.roomId;
   const canDraw = phase === "turn" && isMyTurn && turnStep === "draw";
-  const canSwapByClick = phase === "turn" && isMyTurn && turnStep === "swap" && !!drawn;
+  // ✅ IMPORTANT: swap-by-click is true whenever you have a drawn card on your turn
+  const canSwapByClick = phase === "turn" && isMyTurn && !!drawn;
+
   const canThrowPair = phase === "turn" && isMyTurn && turnStep === "pair";
   const canEndTurn = canThrowPair;
 
@@ -59,7 +63,7 @@ export default function GamePilot() {
   function onHandCardClick(card) {
     if (!card?.id) return;
 
-    // Pair select mode
+    // Pair selection mode
     if (pairMode) {
       setPairSel((prev) => {
         const has = prev.includes(card.id);
@@ -70,7 +74,7 @@ export default function GamePilot() {
       return;
     }
 
-    // Swap-by-click mode (only during swap step)
+    // ✅ Swap-by-click wins over peek
     if (canSwapByClick) {
       send({ type: "SWAP_DRAWN_WITH_HAND", targetCardId: card.id });
       return;
@@ -109,23 +113,40 @@ export default function GamePilot() {
           <div>
             <div style={styles.title}>KARGO — MVP</div>
             <div style={styles.sub}>
-              {room.connected ? "Connected" : "Offline"} {room.roomId ? `• Room: ${room.roomId}` : ""}
+              {room.connected ? "Connected" : "Kargo is offline"}{" "}
+              {room.roomId ? `• Room: ${room.roomId}` : ""}
             </div>
+            {/* Optional debug */}
+            {/* <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
+              Debug: step={turnStep} drawn={drawn ? `${drawn.rank}${drawn.suit}` : "null"} myTurn={String(isMyTurn)}
+            </div> */}
           </div>
           <div style={styles.pills}>
             <span style={styles.pill}>Phase: {phase}</span>
             <span style={styles.pill}>
-              {phase === "turn" ? (isMyTurn ? `Your turn • ${turnStep}` : `Waiting • ${turnStep}`) : "—"}
+              {phase === "turn"
+                ? isMyTurn
+                  ? `Your turn • ${turnStep}`
+                  : `Waiting • ${turnStep}`
+                : "—"}
             </span>
           </div>
         </div>
 
         <div style={styles.lobby}>
-          <input style={styles.input} value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" />
+          <input
+            style={styles.input}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Your name"
+          />
 
           {!room.roomId ? (
             <>
-              <button style={styles.btn} onClick={onCreate} disabled={!room.connected}>Create Room</button>
+              <button style={styles.btn} onClick={onCreate} disabled={!room.connected}>
+                Create Room
+              </button>
+
               <input
                 style={styles.input}
                 value={roomCode}
@@ -133,12 +154,18 @@ export default function GamePilot() {
                 placeholder="Room code (6 digits)"
                 inputMode="numeric"
               />
-              <button style={styles.btn} onClick={onJoin} disabled={!room.connected}>Join Room</button>
+              <button style={styles.btn} onClick={onJoin} disabled={!room.connected}>
+                Join Room
+              </button>
             </>
           ) : (
             <>
-              <button style={styles.btn} onClick={() => send({ type: "READY" })} disabled={!canReady}>Ready</button>
-              <div style={styles.roomHelp}>Share code: <b>{room.roomId}</b></div>
+              <button style={styles.btn} onClick={() => send({ type: "READY" })} disabled={!canReady}>
+                Ready
+              </button>
+              <div style={styles.roomHelp}>
+                Share code: <b>{room.roomId}</b>
+              </div>
             </>
           )}
         </div>
@@ -165,9 +192,7 @@ export default function GamePilot() {
                 <div style={{ ...styles.deckCard, transform: "translate(3px,-3px)" }} />
                 <div style={{ ...styles.deckCard, transform: "translate(6px,-6px)" }} />
               </div>
-              <div style={styles.miniHelp}>
-                {canDraw ? "Click to draw" : phase === "turn" ? "—" : "Not started"}
-              </div>
+              <div style={styles.miniHelp}>{canDraw ? "Click to draw" : "—"}</div>
             </div>
 
             {/* Drawn */}
@@ -179,7 +204,7 @@ export default function GamePilot() {
                 <div style={styles.emptyPile}>—</div>
               )}
               <div style={styles.miniHelp}>
-                {isMyTurn && turnStep === "swap" ? "Click a hand card to swap" : "—"}
+                {isMyTurn && drawn ? "Click a hand card to swap" : "—"}
               </div>
             </div>
 
@@ -195,6 +220,7 @@ export default function GamePilot() {
             </div>
           </div>
 
+          {/* Hand */}
           <div style={{ marginTop: 6 }}>
             <div style={styles.label}>
               Your Hand {me?.name ? <span style={{ opacity: 0.6 }}>• {me.name}</span> : null}
@@ -212,7 +238,12 @@ export default function GamePilot() {
                       padding: 2,
                     }}
                   >
-                    <Card rank={c?.rank} suit={c?.suit} faceDown={false} onClick={() => onHandCardClick(c)} />
+                    <Card
+                      rank={c?.rank}
+                      suit={c?.suit}
+                      faceDown={false}
+                      onClick={() => onHandCardClick(c)}
+                    />
                   </div>
                 );
               })}
@@ -248,8 +279,10 @@ export default function GamePilot() {
             </div>
 
             <div style={styles.footerHelp}>
-              {turnStep === "swap" && isMyTurn ? "Click a hand card to swap with drawn." : ""}
-              {turnStep === "pair" && isMyTurn ? "Optional: Throw Pair (select 2) or End Turn." : ""}
+              {isMyTurn && drawn ? "Swap: click any hand card." : ""}
+              {isMyTurn && turnStep === "pair"
+                ? " Optional: Throw Pair (select 2 + confirm) or End Turn."
+                : ""}
             </div>
           </div>
         </div>
@@ -269,7 +302,8 @@ const styles = {
       "radial-gradient(900px 700px at 55% 95%, rgba(120,255,200,.08), transparent 55%)," +
       "#0b0f14",
     color: "rgba(255,255,255,.92)",
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
+    fontFamily:
+      "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
   },
   wrap: { maxWidth: 980, margin: "0 auto", padding: 12 },
   header: {
@@ -343,7 +377,8 @@ const styles = {
     position: "absolute",
     inset: 0,
     borderRadius: 14,
-    background: "linear-gradient(145deg, rgba(255,255,255,.12), rgba(255,255,255,.04))",
+    background:
+      "linear-gradient(145deg, rgba(255,255,255,.12), rgba(255,255,255,.04))",
     border: "1px solid rgba(255,255,255,.16)",
     boxShadow: "0 12px 28px rgba(0,0,0,.28)",
   },
