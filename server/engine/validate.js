@@ -1,6 +1,9 @@
-// server/validate.js
-import { PHASES } from "./types.js";
+// server/engine/validate.js
+import { PHASES } from "../types.js";
 
+/**
+ * Primary validator (named export).
+ */
 export function validate(state, playerId, action) {
   if (!action || !action.type) return { ok: false, error: "Bad action" };
   if (state.winnerPlayerId) return { ok: false, error: "Game over" };
@@ -13,7 +16,7 @@ export function validate(state, playerId, action) {
     return { ok: true };
   }
 
-  // Claim window: any player may attempt while open
+  // Claim window: ANY player may attempt while open (including turn player)
   if (action.type === "CLAIM_DISCARD") {
     if (!state.claim || !state.claim.open) return { ok: false, error: "No claim window" };
 
@@ -22,6 +25,7 @@ export function validate(state, playerId, action) {
       return { ok: false, error: "Already attempted claim" };
     }
 
+    if (!action.cardId) return { ok: false, error: "Missing cardId" };
     return { ok: true };
   }
 
@@ -37,7 +41,7 @@ export function validate(state, playerId, action) {
   }
 
   // Resolve actions (after draw)
-  // NOTE: Your new model is: draw -> resolve (swap/match OR guess) -> end
+  // Model: draw -> resolve (swap/match OR guess pair) -> end
   if (action.type === "SWAP_DRAWN_WITH_HAND") {
     if (state.turnStep !== "resolve") return { ok: false, error: "You must draw first" };
     if (!state.drawnCard) return { ok: false, error: "You must draw first" };
@@ -66,3 +70,9 @@ export function validate(state, playerId, action) {
   // Unknown action
   return { ok: false, error: `Unknown action: ${action.type}` };
 }
+
+/**
+ * ✅ CRITICAL: alias export to match server/index.js import:
+ *   import { validateAction } from "./engine/validate.js";
+ */
+export const validateAction = validate;
